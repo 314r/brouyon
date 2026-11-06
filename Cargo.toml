@@ -26,6 +26,16 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [profile.dev]
 debug = "limited"
 
+# Half the size of a default release build, 18 MB instead of 37, at about the same speed.
+# Aborting on a panic costs little here: nothing in GPUI recovers from one, and saves are
+# atomic, so a crash can only lose the last moments of typing.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
 # gpui-pre-macros leaves a helper ungated in release builds while its module is
 # gated on debug_assertions. Profiles only apply from the top-level crate, so
 # this has to be repeated from gpui-omarchy's manifest.
