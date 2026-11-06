@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Brouyon
+Comment=Quick-capture markdown notes
+Exec=omarchy-launch-or-focus "^brouyon\\$" "uwsm-app -- brouyon"
+Icon=brouyon
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=notes;markdown;draft;brouillon;
+StartupWMClass=brouyon

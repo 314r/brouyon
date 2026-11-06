@@ -1,0 +1,30 @@
+[package]
+name = "brouyon"
+version = "0.1.0"
+edition = "2024"
+description = "Quick-capture markdown notes for Omarchy"
+
+[dependencies]
+# Pinned to main until a release built on gpui-kit 0.9 reaches crates.io. The
+# published 0.2.1 requires gpui-kit 0.7, and the two versions must match.
+gpui-omarchy = { git = "https://github.com/huacnlee/gpui-omarchy", rev = "8c3fbcfc32ad47943c4a1cacf57c7ff8e9f22b42" }
+gpui-kit = { version = "0.9.0", default-features = false, features = ["assets"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+toml_edit = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+gpui-kit = { version = "0.9.0", default-features = false, features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.dev]
+debug = "limited"
+
+# gpui-pre-macros leaves a helper ungated in release builds while its module is
+# gated on debug_assertions. Profiles only apply from the top-level crate, so
+# this has to be repeated from gpui-omarchy's manifest.
+[profile.release.package.gpui-pre-macros]
+debug-assertions = true
