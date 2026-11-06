@@ -725,10 +725,12 @@ dependencies = [
 name = "brouyon"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "chrono",
  "gpui-kit",
  "gpui-omarchy",
  "image",
+ "notify 7.0.0",
  "pulldown-cmark",
  "serde",
  "tempfile",

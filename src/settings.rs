@@ -7,6 +7,7 @@ use crate::{
         Config, DEFAULT_TEXT_PERCENT, MAX_TEXT_PERCENT, MIN_TEXT_PERCENT, TEXT_PERCENT_STEP,
         ThemeMode,
     },
+    desktop::{self, Desktop},
 };
 use gpui_kit::{
     App, AppContext, Bounds, Context, Div, Entity, FocusHandle, FontWeight, IntoElement,
@@ -69,6 +70,7 @@ impl Section {
 }
 
 fn window_options(config: &Config, cx: &App) -> WindowOptions {
+    let desktop = cx.global::<Desktop>();
     WindowOptions {
         // Launching Brouyon focuses the first window of its app id, which has to
         // be the main one, so this window has an id of its own.
@@ -78,11 +80,16 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
         kind: WindowKind::Floating,
         titlebar: None,
         window_decorations: Some(WindowDecorations::Server),
+        // Set from the start, so the first frame isn't a solid one.
+        window_background: desktop.transparency.surface(),
         window_min_size: Some(size(px(600.), px(400.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
             // Room for the sidebar and the widest button at any text size.
-            size(px((30. * config.rem_px()).max(760.)), px(560.)),
+            size(
+                px((30. * config.rem_px(desktop.text_scale)).max(760.)),
+                px(560.),
+            ),
             cx,
         ))),
         ..Default::default()
@@ -332,7 +339,9 @@ impl SettingsWindow {
                 section("Theme", cx)
                     .child(row().children(themes))
                     .child(description(
-                        "Omarchy follows the current desktop theme and its changes.",
+                        "Omarchy follows the current desktop theme and its changes. Light and \
+                         Dark only set the colours: window transparency, the font and the text \
+                         size still follow the desktop.",
                         cx,
                     )),
             )
@@ -447,7 +456,7 @@ impl Render for SettingsWindow {
         let brouyon = self.app.read(cx);
         let config = brouyon.config().clone();
         let problem = brouyon.settings_problem.clone();
-        window.set_rem_size(px(config.rem_px()));
+        window.set_rem_size(px(config.rem_px(cx.global::<Desktop>().text_scale)));
         let t = cx.omarchy().clone();
 
         let content = match self.section {
@@ -471,7 +480,7 @@ impl Render for SettingsWindow {
             .track_focus(&self.focus)
             .flex()
             .size_full()
-            .bg(t.background)
+            .bg(desktop::root_background(window, cx))
             .text_color(t.foreground)
             .font_family(t.mono_font.clone())
             .text_size(rems(0.75))
@@ -590,6 +599,7 @@ mod tests {
     use super::*;
     use crate::app::tests::{draw, keys, open, open_with, type_and_save};
     use crate::config::Config;
+    use crate::desktop::Transparency;
     use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
     use gpui_omarchy::Theme;
     use std::{fs, path::Path};
@@ -652,6 +662,39 @@ mod tests {
         let options = cx.update(|_, cx| window_options(view.read(cx).config(), cx));
         assert_eq!(options.kind, WindowKind::Floating);
         assert_eq!(options.app_id.as_deref(), Some("brouyon-settings"));
+    }
+
+    #[gpui_kit::test]
+    fn it_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let surface = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| window_options(view.read(cx).config(), cx).window_background)
+        };
+        assert_eq!(surface(cx), gpui_kit::WindowBackgroundAppearance::Opaque);
+        cx.update(|_, cx| cx.global_mut::<Desktop>().transparency = Transparency::Glassy);
+        assert_eq!(
+            surface(cx),
+            gpui_kit::WindowBackgroundAppearance::Transparent
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_desktop_text_size_scales_both_windows_live(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let (settings, mut settings_cx) = open_settings(&view, cx);
+        let base = cx.update(|window, _| window.rem_size());
+
+        cx.update(|_, cx| cx.global_mut::<Desktop>().text_scale = 2.);
+        cx.run_until_parked();
+        draw(cx);
+        draw(&mut settings_cx);
+
+        cx.update(|window, _| assert_eq!(window.rem_size(), base * 2.));
+        settings
+            .update(&mut settings_cx, |_, window, _| {
+                assert_eq!(window.rem_size(), base * 2.);
+            })
+            .unwrap();
     }
 
     #[gpui_kit::test]

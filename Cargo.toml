@@ -3,6 +3,7 @@ name = "brouyon"
 version = "0.1.0"
 edition = "2024"
 description = "Quick-capture markdown notes for Omarchy"
+license = "MIT"
 
 [dependencies]
 # Pinned to main until a release built on gpui-kit 0.9 reaches crates.io. The
@@ -14,6 +15,8 @@ chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 toml_edit = "0.22"
+notify = "7"
+async-channel = "2"
 
 [dev-dependencies]
 tempfile = "3"

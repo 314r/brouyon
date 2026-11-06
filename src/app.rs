@@ -3,22 +3,23 @@
 
 use crate::{
     config::{Config, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
+    desktop::{self, Desktop},
     markdown,
     settings::{self, SettingsWindow},
-    store::{Note, NoteId, Store, title_of},
+    store::{Note, NoteId, Store},
 };
 use chrono::Datelike;
 use gpui_kit::base::{
     Tab, Tabs, VirtualListScrollHandle,
-    input::{Editor, EditorState, InputEvent},
+    input::{Editor, EditorState, InputEvent, Redo},
 };
 use gpui_kit::{
     App, Context, DispatchPhase, Entity, FontWeight, IntoElement, MouseButton, Render, ScrollEvent,
     ScrollStrategy, SharedString, Styled, Subscription, Task, Window, WindowHandle, canvas, div,
-    prelude::*, px, relative, rems, size,
+    prelude::*, px, relative, rems, size, transparent_black,
 };
 use gpui_omarchy::{
-    ActiveTheme, ButtonVariant, IconName, Theme, alert_dialog, button, dialog_button,
+    ActiveTheme, ButtonVariant, IconName, Theme, alert_dialog, button, dialog, dialog_button,
     dialog_description, dialog_popup, dialog_title, icon, virtual_list, with_tooltip,
 };
 use std::{
@@ -31,6 +32,19 @@ use std::{
 /// Saving waits for this pause in typing, so a burst of keys is one write.
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 const KEY_CONTEXT: &str = "Brouyon";
+/// What the shortcuts overlay lists, in the order of the README's table.
+const SHORTCUTS: [(&str, &str); 10] = [
+    ("Ctrl+N", "New note"),
+    ("Alt+↑ / Alt+↓", "Previous / next note"),
+    ("Ctrl+Shift+Backspace", "Move to Trash"),
+    ("Ctrl+Shift+T", "Switch between Notes and Trash"),
+    ("Esc", "Leave the Trash, or close Settings"),
+    ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"),
+    ("Ctrl+,", "Settings"),
+    ("Ctrl+Plus, Ctrl+Minus, Ctrl+0", "Text size"),
+    ("F1", "These shortcuts"),
+    ("Ctrl+Q", "Quit"),
+];
 
 gpui_kit::actions!(
     brouyon,
@@ -45,12 +59,14 @@ gpui_kit::actions!(
         IncreaseTextSize,
         DecreaseTextSize,
         ResetTextSize,
+        ToggleShortcuts,
         Quit
     ]
 );
 
 pub fn init(cx: &mut App) {
     use gpui_kit::KeyBinding;
+    desktop::init(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
     // Scoped to the app's context: a binding with no context would outrank the
     // editor's and the dialog's, so Escape would skip past an open question.
@@ -67,7 +83,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-+", IncreaseTextSize, context),
         KeyBinding::new("ctrl--", DecreaseTextSize, context),
         KeyBinding::new("ctrl-0", ResetTextSize, context),
+        // Typing `?` has to reach the note. F1 is here too because `/` takes Shift on
+        // some layouts, such as AZERTY.
+        KeyBinding::new("f1", ToggleShortcuts, context),
+        KeyBinding::new("ctrl-/", ToggleShortcuts, context),
         KeyBinding::new("ctrl-q", Quit, context),
+        // gpui-base only binds Ctrl+Y on Linux. `Input` is its editor's key context.
+        KeyBinding::new("ctrl-shift-z", Redo, Some("Input")),
     ]);
     settings::bind_keys(cx);
 
@@ -76,23 +98,49 @@ pub fn init(cx: &mut App) {
     // to, gets the system monospace in its place.
     use_mono_font(cx);
     cx.observe_global::<Theme>(use_mono_font).detach();
+    cx.observe_global::<Desktop>(use_mono_font).detach();
 }
 
+/// gpui-omarchy looks the monospace font up only once, so a font changed since then
+/// comes from [`Desktop`]. A new theme arrives with the old one, and this runs before
+/// it's drawn. Writing notifies observers of the theme, this among them, and the second
+/// time through there's nothing left to change.
 fn use_mono_font(cx: &mut App) {
     let theme = cx.omarchy();
-    if theme.font != theme.mono_font {
-        let mono_font = theme.mono_font.clone();
-        cx.global_mut::<Theme>().font = mono_font;
+    let wanted = cx
+        .global::<Desktop>()
+        .font
+        .clone()
+        .unwrap_or_else(|| theme.mono_font.clone());
+    if theme.font != wanted || theme.mono_font != wanted {
+        let theme = cx.global_mut::<Theme>();
+        theme.font = wanted.clone();
+        theme.mono_font = wanted;
         cx.refresh_windows();
     }
 }
 
 pub fn apply_theme(mode: ThemeMode, cx: &mut App) {
     match mode {
-        ThemeMode::Omarchy => Theme::follow_system(cx),
+        ThemeMode::Omarchy => follow_desktop_theme(cx),
         ThemeMode::Light => Theme::flexoki_light().apply(cx),
         ThemeMode::Dark => Theme::tokyo_night().apply(cx),
     }
+    // Not left to the observer: at startup it isn't active yet, and it never hears of
+    // this theme, because GPUI drops a notification when one is already queued.
+    use_mono_font(cx);
+}
+
+#[cfg(not(test))]
+fn follow_desktop_theme(cx: &mut App) {
+    Theme::follow_system(cx);
+}
+
+/// The same palette, without watching the real home folder. Any file changing there
+/// would wake the test scheduler from another thread, which aborts the whole run.
+#[cfg(test)]
+fn follow_desktop_theme(cx: &mut App) {
+    Theme::system_or_default().apply(cx);
 }
 
 /// What the editor pane is showing. The list being shown follows from it.
@@ -140,7 +188,9 @@ pub struct Brouyon {
     save_task: Option<Task<()>>,
     idle_task: Option<Task<()>>,
     confirm: Option<Confirm>,
-    confirm_focus: gpui_kit::FocusHandle,
+    shortcuts_open: bool,
+    /// Held by whichever dialog is open.
+    dialog_focus: gpui_kit::FocusHandle,
     list_scroll: VirtualListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -181,7 +231,8 @@ impl Brouyon {
             save_task: None,
             idle_task: None,
             confirm: None,
-            confirm_focus: cx.focus_handle(),
+            shortcuts_open: false,
+            dialog_focus: cx.focus_handle(),
             list_scroll: VirtualListScrollHandle::new(),
             _subscriptions: subscriptions,
         };
@@ -283,14 +334,7 @@ impl Brouyon {
             .store
             .modified(&id)
             .unwrap_or_else(|_| SystemTime::now());
-        self.notes.insert(
-            0,
-            Note {
-                id: id.clone(),
-                title: title_of(text),
-                modified,
-            },
-        );
+        self.notes.insert(0, Note::new(id.clone(), text, modified));
         self.selection = Selection::Note(id);
         self.loaded_modified = Some(modified);
         if previous_row != Some(0) {
@@ -368,8 +412,8 @@ impl Brouyon {
     }
 
     fn on_idle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A question on screen waits for its answer.
-        if self.confirm.is_some() {
+        // A dialog on screen waits to be closed.
+        if self.dialog_is_open() {
             self.restart_idle_timer(window, cx);
             return;
         }
@@ -565,7 +609,21 @@ impl Brouyon {
 
     fn ask(&mut self, confirm: Confirm, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = Some(confirm);
-        self.confirm_focus.focus(window, cx);
+        self.dialog_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn dialog_is_open(&self) -> bool {
+        self.confirm.is_some() || self.shortcuts_open
+    }
+
+    fn toggle_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shortcuts_open = !self.shortcuts_open;
+        if self.shortcuts_open {
+            self.dialog_focus.focus(window, cx);
+        } else {
+            self.focus_content(window, cx);
+        }
         cx.notify();
     }
 
@@ -696,10 +754,11 @@ impl Brouyon {
     fn sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = cx.omarchy().clone();
         let in_trash = self.selection.in_trash();
-        let width = if window.viewport_size().width < rems(37.5).to_pixels(window.rem_size()) {
+        // Wide enough for a title and its date on one line, unless the editor needs it.
+        let width = if window.viewport_size().width < rems(45.).to_pixels(window.rem_size()) {
             11.25
         } else {
-            15.
+            20.
         };
         let tabs = Tabs::new("note-tabs")
             .flex()
@@ -743,7 +802,7 @@ impl Brouyon {
             .child(tabs)
             .child(new_note);
 
-        let row_height = rems(2.75).to_pixels(window.rem_size());
+        let row_height = rems(3.25).to_pixels(window.rem_size());
         let sizes = Rc::new(vec![
             size(gpui_kit::Pixels::ZERO, row_height);
             self.row_count()
@@ -760,7 +819,10 @@ impl Brouyon {
             cx,
         )
         .track_scroll(&self.list_scroll)
-        .size_full();
+        .size_full()
+        // gpui-omarchy gives lists the theme's solid background, which would hide
+        // the window's own where it's see-through.
+        .bg(transparent_black());
 
         let footer = in_trash.then(|| {
             div()
@@ -808,16 +870,18 @@ impl Brouyon {
             Selection::Trashed(id) => self.trash.iter().find(|note| note.id == *id),
             _ => None,
         };
-        let (title, date): (SharedString, SharedString) = match note {
+        let (title, date, preview): (SharedString, SharedString, SharedString) = match note {
             Some(note) if note.title.is_empty() => (
                 "Untitled".into(),
                 format_date(note.modified, chrono::Local::now()).into(),
+                "".into(),
             ),
             Some(note) => (
                 note.title.clone().into(),
                 format_date(note.modified, chrono::Local::now()).into(),
+                note.preview.clone().into(),
             ),
-            None => ("New note".into(), "".into()),
+            None => ("New note".into(), "".into(), "".into()),
         };
         div()
             .id(("note-row", row))
@@ -836,19 +900,34 @@ impl Brouyon {
             }))
             .child(
                 div()
-                    .truncate()
-                    .text_color(if selected { t.accent } else { t.foreground })
-                    .child(title),
+                    .flex()
+                    .items_baseline()
+                    .gap(rems(0.5))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(if selected { t.accent } else { t.foreground })
+                            .when(selected, |title| title.font_weight(FontWeight::BOLD))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(rems(0.6875))
+                            .text_color(t.secondary)
+                            .child(date),
+                    ),
             )
-            .when(!date.is_empty(), |row| {
-                row.child(
-                    div()
-                        .truncate()
-                        .text_size(rems(0.6875))
-                        .text_color(t.secondary)
-                        .child(date),
-                )
-            })
+            // Empty, it keeps its line, so a title sits at the same height in every row.
+            .child(
+                div()
+                    .truncate()
+                    .text_size(rems(0.6875))
+                    .text_color(t.secondary)
+                    .child(preview),
+            )
     }
 
     fn editor_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1002,16 +1081,58 @@ impl Brouyon {
                     ),
             );
         Some(
-            alert_dialog(&self.confirm_focus, cx)
+            alert_dialog(&self.dialog_focus, cx)
                 .popup(popup)
                 .request_close(move |confirmed, window, cx| close(&confirmed, window, cx)),
+        )
+    }
+
+    fn shortcuts_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if !self.shortcuts_open {
+            return None;
+        }
+        let t = cx.omarchy().clone();
+        let close = cx.listener(|this, _: &bool, window, cx| this.toggle_shortcuts(window, cx));
+        let rows = SHORTCUTS.map(|(keys, action)| {
+            div()
+                .flex()
+                .gap(rems(1.))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(rems(15.))
+                        .text_color(t.bright)
+                        .child(keys),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(t.secondary)
+                        .child(action),
+                )
+        });
+        let popup = div()
+            .id("shortcuts-surface")
+            .occlude()
+            .max_w(relative(0.9))
+            .child(
+                dialog_popup(cx)
+                    .w(rems(36.))
+                    .child(dialog_title("Keyboard shortcuts", cx))
+                    .child(div().flex().flex_col().gap(rems(0.375)).children(rows)),
+            );
+        Some(
+            dialog(&self.dialog_focus, cx)
+                .popup(popup)
+                .request_close(move |closed, window, cx| close(&closed, window, cx)),
         )
     }
 }
 
 impl Render for Brouyon {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.set_rem_size(px(self.config.rem_px()));
+        window.set_rem_size(px(self.config.rem_px(cx.global::<Desktop>().text_scale)));
         let t = cx.omarchy().clone();
         let style = markdown::editor_style(&t);
         self.editor
@@ -1019,14 +1140,16 @@ impl Render for Brouyon {
         let sidebar = self.sidebar(window, cx);
         let editor_pane = self.editor_pane(cx);
         let dialog = self.confirm_dialog(cx);
+        let shortcuts = self.shortcuts_dialog(cx);
         let view = cx.entity().downgrade();
-        let answering = self.confirm.is_some();
+        let answering = self.dialog_is_open();
+        let questioning = self.confirm.is_some();
         div()
             .key_context(KEY_CONTEXT)
             .relative()
             .flex()
             .size_full()
-            .bg(t.background)
+            .bg(desktop::root_background(window, cx))
             .text_color(t.foreground)
             .font_family(t.mono_font.clone())
             .text_size(rems(0.75))
@@ -1036,7 +1159,13 @@ impl Render for Brouyon {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.restart_idle_timer(window, cx);
             }))
-            // An open question keeps the keyboard to itself.
+            // The key that opens the shortcuts closes them too, but a question comes first.
+            .when(!questioning, |root| {
+                root.on_action(cx.listener(|this, _: &ToggleShortcuts, window, cx| {
+                    this.toggle_shortcuts(window, cx);
+                }))
+            })
+            // An open dialog keeps the keyboard to itself.
             .when(!answering, |root| {
                 root.on_action(cx.listener(|this, _: &NewNote, window, cx| {
                     this.select(Selection::Blank, window, cx);
@@ -1093,6 +1222,7 @@ impl Render for Brouyon {
             .child(sidebar)
             .child(editor_pane)
             .children(dialog)
+            .children(shortcuts)
     }
 }
 
@@ -1212,6 +1342,7 @@ impl Brouyon {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::desktop::Transparency;
     use chrono::TimeZone;
     use gpui_kit::{
         Focusable, Modifiers, TestAppContext, VisualTestContext, base::actions, point, px,
@@ -1233,9 +1364,11 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
         dir: tempfile::TempDir,
     ) -> (tempfile::TempDir, Entity<Brouyon>, &mut VisualTestContext) {
+        // As `main` starts. This also ends `gpui_omarchy::init`'s watch on the real home.
         cx.update(|cx| {
             gpui_omarchy::init(cx);
             init(cx);
+            apply_theme(ThemeMode::Omarchy, cx);
         });
         let store = Store::open(dir.path()).unwrap();
         let config = Config::for_test(dir.path());
@@ -1351,6 +1484,32 @@ pub(crate) mod tests {
 
         type_and_save(cx, " world");
         assert_eq!(note_texts(dir.path()), ["hello world"], "no second file");
+    }
+
+    /// In the order `main` does it. A theme applied here replaces the one `init` has
+    /// just corrected, and it isn't observed yet.
+    #[gpui_kit::test]
+    fn widgets_have_the_mono_font_from_the_start(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_omarchy::init(cx);
+            init(cx);
+            apply_theme(ThemeMode::Omarchy, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(cx.omarchy().font, cx.omarchy().mono_font));
+    }
+
+    #[gpui_kit::test]
+    fn the_preview_follows_the_note_as_it_is_typed(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let first_preview =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).notes[0].preview.clone());
+
+        type_and_save(cx, "A title");
+        assert_eq!(first_preview(cx), "");
+
+        type_and_save(cx, "\nthe line under it");
+        assert_eq!(first_preview(cx), "the line under it");
     }
 
     #[gpui_kit::test]
@@ -1810,6 +1969,135 @@ pub(crate) mod tests {
         cx.update(|_, cx| assert!(view.read(cx).confirm.is_some()));
     }
 
+    fn shortcuts_open(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|_, cx| view.read(cx).shortcuts_open)
+    }
+
+    #[gpui_kit::test]
+    fn both_keys_open_the_shortcuts_and_they_close_again(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        for key in ["f1", "ctrl-/"] {
+            keys(cx, key);
+            assert!(shortcuts_open(&view, cx), "{key} opens them");
+            keys(cx, key);
+            assert!(!shortcuts_open(&view, cx), "{key} closes them");
+        }
+
+        keys(cx, "f1");
+        keys(cx, "escape");
+        assert!(!shortcuts_open(&view, cx), "so does Esc");
+        cx.update(|window, cx| {
+            let focus = view.read(cx).editor.read(cx).focus_handle(cx);
+            assert!(focus.is_focused(window), "ready to type again");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_question_mark_goes_in_the_note(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("?");
+        assert_eq!(editor_text(&view, cx), "?");
+        assert!(!shortcuts_open(&view, cx));
+    }
+
+    #[gpui_kit::test]
+    fn the_shortcuts_hold_the_keyboard_and_the_idle_move(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        type_and_save(cx, "open note");
+        keys(cx, "f1");
+
+        keys(cx, "ctrl-n");
+        keys(cx, "ctrl-shift-backspace");
+        assert!(matches!(selection(&view, cx), Selection::Note(_)));
+        assert_eq!(note_texts(dir.path()), ["open note"]);
+
+        wait(cx, IDLE * 2);
+        assert!(matches!(selection(&view, cx), Selection::Note(_)));
+        assert!(shortcuts_open(&view, cx));
+
+        keys(cx, "escape");
+        wait(cx, IDLE);
+        assert_eq!(selection(&view, cx), Selection::Blank, "the timer goes on");
+    }
+
+    #[gpui_kit::test]
+    fn the_shortcuts_key_leaves_an_open_question_alone(cx: &mut TestAppContext) {
+        let (_dir, view, cx, id) = with_one_trashed_note(cx);
+        view.update_in(cx, |this, window, cx| {
+            this.ask(Confirm::DeleteForever(id), window, cx);
+        });
+        draw(cx);
+        keys(cx, "f1");
+        assert!(!shortcuts_open(&view, cx));
+        cx.update(|_, cx| assert!(view.read(cx).confirm.is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn both_redo_keys_bring_back_what_undo_took(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("words");
+        for redo in ["ctrl-shift-z", "ctrl-y"] {
+            keys(cx, "ctrl-z");
+            assert_eq!(editor_text(&view, cx), "", "before {redo}");
+            keys(cx, redo);
+            assert_eq!(editor_text(&view, cx), "words", "{redo}");
+        }
+    }
+
+    fn set_desktop(cx: &mut VisualTestContext, change: impl FnOnce(&mut Desktop)) {
+        cx.update(|_, cx| change(cx.global_mut::<Desktop>()));
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn only_the_root_background_follows_the_transparency_mode(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open(cx);
+        let alpha = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| desktop::root_background(window, cx).a)
+        };
+        assert_eq!(alpha(cx), 1., "solid until told otherwise");
+
+        set_desktop(cx, |desktop| {
+            desktop.transparency = desktop::Transparency::Glassy;
+        });
+        let active = cx.update(|window, _| window.is_window_active());
+        assert_eq!(alpha(cx), desktop::Transparency::Glassy.alpha(active));
+        cx.update(|_, cx| {
+            assert_eq!(cx.omarchy().background.a, 1., "dialogs paint this one");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_fixed_theme_stays_when_the_desktop_changes(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        view.update(cx, |this, cx| this.set_theme(ThemeMode::Light, cx));
+        set_desktop(cx, |desktop| {
+            desktop.transparency = desktop::Transparency::Glassy;
+            desktop.font = Some("Another Mono".into());
+        });
+        cx.update(|_, cx| {
+            let theme = cx.omarchy();
+            assert_eq!(theme.name, Theme::flexoki_light().name);
+            assert_eq!(theme.mono_font, "Another Mono", "the font still follows");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_changed_font_survives_every_theme(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        set_desktop(cx, |desktop| desktop.font = Some("Another Mono".into()));
+        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
+            view.update(cx, |this, cx| this.set_theme(mode, cx));
+            // Parking at all shows that observing the theme doesn't feed itself.
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(cx.omarchy().font, "Another Mono", "{mode:?}");
+                assert_eq!(cx.omarchy().mono_font, "Another Mono", "{mode:?}");
+            });
+        }
+    }
+
     #[gpui_kit::test]
     fn a_failed_save_keeps_the_text_and_stays_on_the_note(cx: &mut TestAppContext) {
         let (dir, view, cx) = open(cx);
@@ -1939,12 +2227,18 @@ pub(crate) mod tests {
             Arc::new(gpui_kit::assets::Assets),
             gpui_kit::platform::current_headless_renderer,
         );
+        // As `main` starts, so that these pictures show what a real window does.
         cx.update(|cx| {
             gpui_omarchy::init(cx);
             init(cx);
+            apply_theme(ThemeMode::Omarchy, cx);
         });
 
-        fn capture(cx: &mut HeadlessAppContext, window: AnyWindowHandle, path: &Path) {
+        fn capture(
+            cx: &mut HeadlessAppContext,
+            window: AnyWindowHandle,
+            path: &Path,
+        ) -> image::RgbaImage {
             let draw = |cx: &mut HeadlessAppContext| {
                 cx.run_until_parked();
                 cx.update_window(window, |_, window, cx| {
@@ -1965,6 +2259,7 @@ pub(crate) mod tests {
                     .any(|pixel| pixel.0[..3] != image.get_pixel(0, 0).0[..3])
             );
             image.save(path).unwrap();
+            image
         }
 
         let mut config = Config::for_test(dir.path());
@@ -2078,17 +2373,134 @@ pub(crate) mod tests {
             &out.join("13-settings-large-text.png"),
         );
 
-        let narrow: AnyWindowHandle = cx
+        let narrow_window = cx
             .open_window(size(px(500.), px(420.)), |window, cx| {
                 let store = Store::open(dir.path()).unwrap();
                 cx.new(|cx| Brouyon::new(store, narrow_config, window, cx))
             })
-            .unwrap()
-            .into();
+            .unwrap();
+        let narrow: AnyWindowHandle = narrow_window.into();
         window
             .update(&mut cx, |this, _, cx| this.set_text_percent(100, cx))
             .unwrap();
         capture(&mut cx, narrow, &out.join("14-narrow.png"));
+        narrow_window
+            .update(&mut cx, |this, window, cx| {
+                this.toggle_shortcuts(window, cx);
+            })
+            .unwrap();
+        capture(&mut cx, narrow, &out.join("14-narrow-shortcuts.png"));
+
+        window
+            .update(&mut cx, |this, window, cx| {
+                this.toggle_shortcuts(window, cx);
+            })
+            .unwrap();
+        capture(&mut cx, any_window, &out.join("15-shortcuts.png"));
+        window
+            .update(&mut cx, |this, window, cx| {
+                this.toggle_shortcuts(window, cx);
+                this.select(Selection::Blank, window, cx);
+                this.set_theme(ThemeMode::Light, cx);
+            })
+            .unwrap();
+
+        // The same screen solid and then as glass. Headless draws over black, so
+        // whatever is see-through comes out darker by its alpha. A light theme makes
+        // that easy to measure, and any solid layer left behind shows up as a failure.
+        let solid = capture(&mut cx, any_window, &out.join("16-solid.png"));
+        cx.update(|cx| cx.global_mut::<Desktop>().transparency = Transparency::Glassy);
+        let glassy = capture(&mut cx, any_window, &out.join("17-glassy.png"));
+        for (place, x, y) in [
+            ("note list", 120, 700),
+            ("editor", 700, 500),
+            ("status strip", 600, 742),
+        ] {
+            let before = solid.get_pixel(x, y).0;
+            let after = glassy.get_pixel(x, y).0;
+            for channel in 0..3 {
+                let ratio = f32::from(after[channel]) / f32::from(before[channel]);
+                assert!(
+                    (0.58..0.70).contains(&ratio),
+                    "{place}: {before:?} became {after:?}"
+                );
+            }
+        }
+        capture(&mut cx, any_settings, &out.join("18-glassy-settings.png"));
+
+        // A dialog is the one place the solid background can still appear.
+        let background = solid.get_pixel(120, 700).0;
+        let has_solid_background =
+            |image: &image::RgbaImage| image.pixels().any(|pixel| pixel.0 == background);
+        assert!(!has_solid_background(&glassy));
+        window
+            .update(&mut cx, |this, window, cx| {
+                this.ask(Confirm::EmptyTrash, window, cx);
+            })
+            .unwrap();
+        let confirm = capture(&mut cx, any_window, &out.join("19-glassy-confirm.png"));
+        assert!(has_solid_background(&confirm));
+        window
+            .update(&mut cx, |this, window, cx| this.answer(false, window, cx))
+            .unwrap();
+
+        // The picture at the top of the README: made-up notes and the default palette,
+        // so it doesn't depend on who runs this or on the current theme.
+        let readme_dir = tempfile::tempdir().unwrap();
+        for (days_ago, name, text) in [
+            (
+                0,
+                "2026-11-06 09-40-00.md",
+                "# Ideas for the weekend\n\n\
+                 Walk to the old mill if it stays dry.\n\n\
+                 Otherwise the **market**, and the *bakery* on the way back.\n\n\
+                 ## To bring\n\n- [x] Thermos\n- [ ] Rain jacket\n- [ ] Map of the valley\n\n\
+                 > Leave before the bakery sells out.\n\n\
+                 Ask about the `opening hours` on Sunday.\n",
+            ),
+            (
+                1,
+                "2026-11-05 18-00-00.md",
+                "Book recommendations\nfrom the club",
+            ),
+            (
+                2,
+                "2026-11-04 12-00-00.md",
+                "Fix the shelf in the hallway\nTwo screws are missing",
+            ),
+            (
+                4,
+                "2026-11-02 08-30-00.md",
+                "Questions for the plumber\nWhy does the tap drip at night?",
+            ),
+        ] {
+            let path = readme_dir.path().join(name);
+            fs::write(&path, text).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(days_ago * 86_400))
+                .unwrap();
+        }
+        cx.update(|cx| {
+            cx.global_mut::<Desktop>().transparency = Transparency::Opaque;
+            Theme::tokyo_night().apply(cx);
+        });
+        let readme_store = Store::open(readme_dir.path()).unwrap();
+        let mut readme_config = Config::for_test(readme_dir.path());
+        readme_config.idle = None;
+        let readme = cx
+            .open_window(size(px(1060.), px(760.)), |window, cx| {
+                cx.new(|cx| Brouyon::new(readme_store, readme_config, window, cx))
+            })
+            .unwrap();
+        readme
+            .update(&mut cx, |this, window, cx| {
+                this.select(Selection::Note("2026-11-06 09-40-00.md".into()), window, cx);
+            })
+            .unwrap();
+        capture(&mut cx, readme.into(), &out.join("readme.png"));
     }
 
     #[test]

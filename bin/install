@@ -1,0 +1,19 @@
+#!/bin/sh
+# Builds Brouyon as an Arch package and installs it, which puts it in the Omarchy
+# launcher. Run it again to update. pacman asks for your password.
+set -eu
+
+cd "$(dirname "$0")/../pkgbuild"
+makepkg -fsi "$@"
+
+# Brouyon used to install itself by hand. A user's own desktop entry and icon override
+# a package's, so those copies have to go. Notes and settings are elsewhere.
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+rm -f "$HOME/.local/bin/brouyon" \
+    "$data/applications/brouyon.desktop" \
+    "$data/icons/hicolor/scalable/apps/brouyon.svg"
+if command -v update-desktop-database >/dev/null && [ -d "$data/applications" ]; then
+    update-desktop-database "$data/applications"
+fi
+
+echo "Installed. Brouyon is in the Omarchy launcher, or run: brouyon"

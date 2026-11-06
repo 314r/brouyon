@@ -1,0 +1,6 @@
+#!/bin/sh
+# Runs the tests, none of which open a window or touch real notes.
+set -eu
+
+cd "$(dirname "$0")/.."
+cargo test "$@"

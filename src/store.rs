@@ -11,6 +11,8 @@ use std::{
 
 const TRASH_DIR: &str = ".trash";
 const EXTENSION: &str = "md";
+/// More than any list is wide, and a long line costs nothing to keep out of it.
+const PREVIEW_CHARS: usize = 200;
 
 /// A note's file name, such as `2026-11-06 09-42-15.md`. Set at creation and never
 /// changed, so editing the title does not rename the file.
@@ -20,7 +22,20 @@ pub type NoteId = String;
 pub struct Note {
     pub id: NoteId,
     pub title: String,
+    /// The line under the title in the list. Empty for a note of one line.
+    pub preview: String,
     pub modified: SystemTime,
+}
+
+impl Note {
+    pub fn new(id: NoteId, text: &str, modified: SystemTime) -> Self {
+        Self {
+            id,
+            title: title_of(text),
+            preview: preview_of(text),
+            modified,
+        }
+    }
 }
 
 pub struct Store {
@@ -151,23 +166,37 @@ fn scan(dir: &Path) -> io::Result<Vec<Note>> {
         if !metadata.is_file() {
             continue;
         }
-        notes.push(Note {
-            id: id.to_string(),
-            title: title_of(&text),
-            modified: metadata.modified()?,
-        });
+        notes.push(Note::new(id.to_string(), &text, metadata.modified()?));
     }
     notes.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.id.cmp(&a.id)));
     Ok(notes)
 }
 
-/// The first line with content, without its markdown markers.
-pub fn title_of(text: &str) -> String {
-    text.lines()
-        .map(clean_line)
-        .find(|line| !line.is_empty())
+fn title_of(text: &str) -> String {
+    content_lines(text).next().unwrap_or_default().to_string()
+}
+
+fn preview_of(text: &str) -> String {
+    content_lines(text)
+        .nth(1)
         .unwrap_or_default()
-        .to_string()
+        .chars()
+        .take(PREVIEW_CHARS)
+        .collect()
+}
+
+/// The lines with content, without their markdown markers. A code fence is no line
+/// of content, whether or not it names a language, but the code inside it is.
+fn content_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter(|line| !is_fence(line))
+        .map(clean_line)
+        .filter(|line| !line.is_empty())
+}
+
+fn is_fence(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("```") || line.starts_with("~~~")
 }
 
 fn clean_line(line: &str) -> &str {
@@ -190,12 +219,26 @@ fn clean_line(line: &str) -> &str {
             break;
         }
     }
-    let s = s.trim().trim_matches(['*', '_', '`', '~']).trim();
+    let s = unwrapped(s.trim()).trim();
     // Horizontal rules and setext underlines carry no title.
     if s.bytes().all(|b| matches!(b, b'-' | b'=' | b' ')) {
         return "";
     }
     s
+}
+
+/// Without the emphasis around a whole line, such as `**this**`. Marks around only
+/// part of a line stay, or `see `this`` would lose its last backtick.
+fn unwrapped(s: &str) -> &str {
+    let is_mark = |c: char| matches!(c, '*' | '_' | '`' | '~');
+    let opening = &s[..s.len() - s.trim_start_matches(is_mark).len()];
+    let closing = &s[s.trim_end_matches(is_mark).len()..];
+    let inner = s.trim_matches(is_mark);
+    if opening.chars().rev().eq(closing.chars()) && !inner.contains(is_mark) {
+        inner
+    } else {
+        s
+    }
 }
 
 #[cfg(test)]
@@ -398,8 +441,55 @@ mod tests {
             ("é accentué", "é accentué"),
             ("", ""),
             ("  \n \n", ""),
+            ("```sh\nmake install\n```", "make install"),
+            ("~~~\ncode\n~~~", "code"),
+            ("~~struck~~", "struck"),
+            ("_**both**_", "both"),
+            ("***", ""),
+            (
+                "Ask about the `opening hours`",
+                "Ask about the `opening hours`",
+            ),
+            ("**Note:** read this", "**Note:** read this"),
+            ("*one* and *two*", "*one* and *two*"),
+            ("__init__.py", "__init__.py"),
+            ("snake_case_name", "snake_case_name"),
         ] {
             assert_eq!(title_of(text), title, "for {text:?}");
         }
+    }
+
+    #[test]
+    fn previews_come_from_the_next_line_with_content() {
+        for (text, preview) in [
+            ("", ""),
+            ("Title", ""),
+            ("Title\n\n  \n", ""),
+            ("Title\nSecond", "Second"),
+            ("\nTitle\n  \nSecond line\nThird", "Second line"),
+            ("# Title\n\n- milk\n- eggs", "milk"),
+            ("Title\n---\nnext", "next"),
+            ("Title\n=====\nnext", "next"),
+            ("Install\n```sh\nmake install\n```", "make install"),
+            ("Title\n- [x] done", "done"),
+            ("Title\nsee `this`", "see `this`"),
+        ] {
+            assert_eq!(preview_of(text), preview, "for {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_preview_is_cut_between_characters() {
+        let text = format!("Title\n{}", "é".repeat(PREVIEW_CHARS * 2));
+        assert_eq!(preview_of(&text), "é".repeat(PREVIEW_CHARS));
+    }
+
+    #[test]
+    fn the_list_carries_each_notes_preview() {
+        let (dir, store) = store();
+        fs::write(dir.path().join("a.md"), "# Groceries\n\n- milk").unwrap();
+        let note = &store.list().unwrap()[0];
+        assert_eq!(note.title, "Groceries");
+        assert_eq!(note.preview, "milk");
     }
 }

@@ -1,4 +1,4 @@
-//! User settings in `config.toml`, plus the one desktop setting read from Omarchy.
+//! User settings in `config.toml`.
 
 use crate::store::write_atomically;
 use serde::Deserialize;
@@ -10,8 +10,6 @@ use std::{
 use toml_edit::DocumentMut;
 
 const DEFAULT_IDLE_MINUTES: f64 = 5.;
-/// The size Omarchy's shell metrics are defined against.
-const OMARCHY_BASELINE_FONT_SIZE: f32 = 12.;
 /// The size gpui-omarchy's metrics assume, matching Omarchy's default text size.
 const BASE_REM_SIZE: f32 = 16.;
 
@@ -51,7 +49,6 @@ pub struct Config {
     pub theme: ThemeMode,
     /// Scales the desktop's text size throughout the app.
     pub text_percent: u32,
-    desktop_text_scale: f32,
 }
 
 #[derive(Default, Deserialize)]
@@ -65,26 +62,16 @@ struct FileConfig {
 
 impl Config {
     /// Reads `$XDG_CONFIG_HOME/brouyon/config.toml`. Defaults apply when it is
-    /// missing or invalid.
-    pub fn load() -> Self {
+    /// missing or invalid, and what's wrong with an invalid one comes back to be shown.
+    pub fn load() -> (Self, Option<String>) {
         let home = home_dir();
         let path = xdg_dir("XDG_CONFIG_HOME", ".config", &home).join("brouyon/config.toml");
         let data_home = xdg_dir("XDG_DATA_HOME", ".local/share", &home);
-        let contents = fs::read_to_string(&path).unwrap_or_default();
-        let file = toml::from_str(&contents).unwrap_or_else(|error| {
-            eprintln!("brouyon: ignoring {}: {error}", path.display());
-            FileConfig::default()
-        });
-        Self::resolve(file, path, &data_home, &home, omarchy_text_scale())
+        let (file, problem) = read_file_config(&path);
+        (Self::resolve(file, path, &data_home, &home), problem)
     }
 
-    fn resolve(
-        file: FileConfig,
-        path: PathBuf,
-        data_home: &Path,
-        home: &Path,
-        desktop_text_scale: f32,
-    ) -> Self {
+    fn resolve(file: FileConfig, path: PathBuf, data_home: &Path, home: &Path) -> Self {
         let default_notes_dir = data_home.join("brouyon");
         let notes_dir = file
             .notes_dir
@@ -106,7 +93,6 @@ impl Config {
             text_percent: normalized_text_percent(
                 file.text_percent.unwrap_or(DEFAULT_TEXT_PERCENT),
             ),
-            desktop_text_scale,
         }
     }
 
@@ -121,7 +107,6 @@ impl Config {
             idle: Some(Duration::from_secs(300)),
             theme: ThemeMode::default(),
             text_percent: DEFAULT_TEXT_PERCENT,
-            desktop_text_scale: 1.,
         }
     }
 
@@ -131,8 +116,8 @@ impl Config {
     }
 
     /// The window's rem size for the desktop's text size and the chosen scale.
-    pub fn rem_px(&self) -> f32 {
-        BASE_REM_SIZE * self.desktop_text_scale * self.text_percent as f32 / 100.
+    pub fn rem_px(&self, desktop_text_scale: f32) -> f32 {
+        BASE_REM_SIZE * desktop_text_scale * self.text_percent as f32 / 100.
     }
 
     /// Each setter applies for this session even when saving fails, and returns
@@ -199,6 +184,29 @@ impl Config {
     }
 }
 
+/// The settings in `path`, or the defaults and what went wrong. A missing file is fine.
+fn read_file_config(path: &Path) -> (FileConfig, Option<String>) {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return (FileConfig::default(), Some(unreadable(path, error))),
+    };
+    match toml::from_str(&contents) {
+        Ok(file) => (file, None),
+        Err(error) => (
+            FileConfig::default(),
+            Some(unreadable(path, error.message())),
+        ),
+    }
+}
+
+fn unreadable(path: &Path, error: impl fmt::Display) -> String {
+    format!(
+        "Can't read {}: {error}. Using the default settings.",
+        path.display()
+    )
+}
+
 fn invalid(path: &Path, error: impl fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -212,40 +220,15 @@ pub fn normalized_text_percent(percent: u32) -> u32 {
     (steps * TEXT_PERCENT_STEP).clamp(MIN_TEXT_PERCENT, MAX_TEXT_PERCENT)
 }
 
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-fn xdg_dir(variable: &str, fallback: &str, home: &Path) -> PathBuf {
+pub(crate) fn xdg_dir(variable: &str, fallback: &str, home: &Path) -> PathBuf {
     env::var_os(variable)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(fallback))
-}
-
-/// How much larger than Omarchy's baseline the user set their desktop text:
-/// `[font] base-size` from the file `omarchy display text size` writes, then from
-/// the theme's own shell file. gpui-omarchy doesn't read this yet.
-fn omarchy_text_scale() -> f32 {
-    let home = home_dir();
-    [
-        home.join(".config/omarchy/shell.toml"),
-        home.join(".local/state/omarchy/current/theme/shell.toml"),
-    ]
-    .iter()
-    .filter_map(|path| fs::read_to_string(path).ok())
-    .find_map(|contents| text_scale_from(&contents))
-    .unwrap_or(1.)
-}
-
-fn text_scale_from(shell_toml: &str) -> Option<f32> {
-    let table: toml::Table = shell_toml.parse().ok()?;
-    let font = table.get("font")?.as_table()?;
-    let value = font.get("base-size")?;
-    let size = value
-        .as_float()
-        .or_else(|| value.as_integer().map(|n| n as f64))? as f32;
-    (size > 0.).then_some(size / OMARCHY_BASELINE_FONT_SIZE)
 }
 
 #[cfg(test)]
@@ -259,7 +242,6 @@ mod tests {
             "/config/config.toml".into(),
             Path::new("/data"),
             Path::new("/home/me"),
-            1.,
         )
     }
 
@@ -271,7 +253,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, contents).unwrap();
         }
-        let config = Config::resolve(FileConfig::default(), path, dir.path(), dir.path(), 1.);
+        let config = Config::resolve(FileConfig::default(), path, dir.path(), dir.path());
         (dir, config)
     }
 
@@ -287,7 +269,6 @@ mod tests {
             config.path.clone(),
             config.default_notes_dir.parent().unwrap(),
             config.default_notes_dir.parent().unwrap(),
-            1.,
         )
     }
 
@@ -347,10 +328,38 @@ mod tests {
 
     #[test]
     fn rem_size_combines_the_desktop_size_and_the_chosen_scale() {
-        let mut config = resolve("text_percent = 150");
-        assert_eq!(config.rem_px(), 24.);
-        config.desktop_text_scale = 2.;
-        assert_eq!(config.rem_px(), 48.);
+        let config = resolve("text_percent = 150");
+        assert_eq!(config.rem_px(1.), 24.);
+        assert_eq!(config.rem_px(2.), 48.);
+    }
+
+    #[test]
+    fn a_missing_settings_file_is_not_a_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, problem) = read_file_config(&dir.path().join("config.toml"));
+        assert_eq!(problem, None);
+    }
+
+    #[test]
+    fn an_invalid_settings_file_gives_the_defaults_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "idle_minutes = 7\nunknown_key = 1\n").unwrap();
+
+        let (file, problem) = read_file_config(&path);
+        assert_eq!(file.idle_minutes, None, "not half applied");
+        let problem = problem.unwrap();
+        assert!(problem.contains(path.to_str().unwrap()), "{problem}");
+        assert!(problem.contains("unknown_key"), "{problem}");
+        assert!(problem.contains("default settings"), "{problem}");
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_opened_is_a_problem_too() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder where the file should be fails with something other than "not found".
+        let (_, problem) = read_file_config(dir.path());
+        assert!(problem.unwrap().contains("default settings"));
     }
 
     #[test]
@@ -423,17 +432,5 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["config.toml"]);
-    }
-
-    #[test]
-    fn text_scale_reads_the_shell_font_base_size() {
-        assert_eq!(text_scale_from("[font]\nbase-size = 16"), Some(16. / 12.));
-        assert_eq!(
-            text_scale_from("[font]\nbase-size = 13.5"),
-            Some(13.5 / 12.)
-        );
-        assert_eq!(text_scale_from("[bar]\nsize = 3"), None);
-        assert_eq!(text_scale_from("[font]\nbase-size = 0"), None);
-        assert_eq!(text_scale_from("not toml ="), None);
     }
 }
