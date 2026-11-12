@@ -6,6 +6,7 @@ A very simple markdown notepad for [Omarchy](https://omarchy.org), inspired by
 [Drafts](https://getdrafts.com). It always opens on a blank note, ready to type.
 
 - Notes save themselves as you type.
+- Lists keep up: Enter starts the next item, and `Ctrl+Enter` ticks a task.
 - After 5 minutes without activity, Brouyon saves and moves to a new blank note.
 - Notes are listed on the left, with a tab for the Trash. There are no tags, folders
   or archive.
@@ -37,6 +38,7 @@ o.bind("SUPER + N", "Brouyon", "omarchy-launch-or-focus '^brouyon$' 'uwsm-app --
 |---|---|
 | `Ctrl+N` | New note |
 | `Alt+↑` / `Alt+↓` | Previous / next note |
+| `Ctrl+Enter` | Tick a task, or make the line one |
 | `Ctrl+Shift+Backspace` | Move to Trash |
 | `Ctrl+Shift+T` | Switch between the Notes and Trash tabs |
 | `Esc` | Leave the Trash, or close Settings |
@@ -45,6 +47,16 @@ o.bind("SUPER + N", "Brouyon", "omarchy-launch-or-focus '^brouyon$' 'uwsm-app --
 | `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | Text size |
 | `F1` or `Ctrl+/` | Show these shortcuts |
 | `Ctrl+Q` | Quit |
+
+## Lists
+
+Start a line with `- `, `* `, `+ `, `1. ` or `- [ ] `, and Enter starts the next item:
+the same bullet, the next number, or a task still to do. Enter on an item left empty
+goes back a level, and at the first level it ends the list. `Shift+Enter` gives a plain
+new line.
+
+`Ctrl+Enter` ticks the task the cursor is on, or unticks it. On a line that isn't a
+task, it makes it one. Code blocks are left as typed.
 
 ## Your notes
 

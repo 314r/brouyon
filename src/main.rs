@@ -4,6 +4,7 @@ extern crate gpui_kit as gpui;
 mod app;
 mod config;
 mod desktop;
+mod lists;
 mod markdown;
 mod settings;
 mod store;

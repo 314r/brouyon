@@ -4,7 +4,7 @@
 use crate::{
     config::{Config, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
     desktop::{self, Desktop},
-    markdown,
+    lists, markdown,
     settings::{self, SettingsWindow},
     store::{Note, NoteId, Store},
 };
@@ -14,9 +14,9 @@ use gpui_kit::base::{
     input::{Editor, EditorState, InputEvent, Redo},
 };
 use gpui_kit::{
-    App, Context, DispatchPhase, Entity, FontWeight, IntoElement, MouseButton, Render, ScrollEvent,
-    ScrollStrategy, SharedString, Styled, Subscription, Task, Window, WindowHandle, canvas, div,
-    prelude::*, px, relative, rems, size, transparent_black,
+    App, Context, DispatchPhase, Entity, Focusable, FontWeight, IntoElement, MouseButton, Render,
+    ScrollEvent, ScrollStrategy, SharedString, Styled, Subscription, Task, Window, WindowHandle,
+    canvas, div, prelude::*, px, relative, rems, size, transparent_black,
 };
 use gpui_omarchy::{
     ActiveTheme, ButtonVariant, IconName, Theme, alert_dialog, button, dialog, dialog_button,
@@ -33,9 +33,10 @@ use std::{
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 const KEY_CONTEXT: &str = "Brouyon";
 /// What the shortcuts overlay lists, in the order of the README's table.
-const SHORTCUTS: [(&str, &str); 10] = [
+const SHORTCUTS: [(&str, &str); 11] = [
     ("Ctrl+N", "New note"),
     ("Alt+↑ / Alt+↓", "Previous / next note"),
+    ("Ctrl+Enter", "Tick a task, or make the line one"),
     ("Ctrl+Shift+Backspace", "Move to Trash"),
     ("Ctrl+Shift+T", "Switch between Notes and Trash"),
     ("Esc", "Leave the Trash, or close Settings"),
@@ -52,6 +53,7 @@ gpui_kit::actions!(
         NewNote,
         PreviousNote,
         NextNote,
+        ToggleTask,
         MoveToTrash,
         ToggleTrash,
         LeaveTrash,
@@ -91,6 +93,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-q", Quit, context),
         // gpui-base only binds Ctrl+Y on Linux. `Input` is its editor's key context.
         KeyBinding::new("ctrl-shift-z", Redo, Some("Input")),
+        // In that context to come before the editor's own use of the key, a newline.
+        KeyBinding::new("ctrl-enter", ToggleTask, Some("Input")),
     ]);
     settings::bind_keys(cx);
 
@@ -272,17 +276,47 @@ impl Brouyon {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, InputEvent::Change) {
-            self.dirty = true;
-            self.restart_idle_timer(window, cx);
-            self.save_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(SAVE_DELAY).await;
-                this.update(cx, |this, cx| {
-                    this.flush(cx);
-                })
-                .ok();
-            }));
+        match event {
+            InputEvent::Change => {
+                self.dirty = true;
+                self.restart_idle_timer(window, cx);
+                self.save_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SAVE_DELAY).await;
+                    this.update(cx, |this, cx| {
+                        this.flush(cx);
+                    })
+                    .ok();
+                }));
+            }
+            // The editor has made its new line by now. Shift+Enter keeps it plain.
+            InputEvent::PressEnter { shift: false, .. } => {
+                self.edit_list(lists::after_enter, window, cx);
+            }
+            _ => {}
         }
+    }
+
+    /// Makes the edit `edit` finds for the text and the cursor, if any. It goes
+    /// through the editor like typing does, so it is saved and can be undone.
+    fn edit_list(
+        &mut self,
+        edit: fn(&str, usize) -> Option<lists::Edit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |state, cx| {
+            let selection = state.selected_range();
+            if !state.is_editable() || !selection.is_empty() {
+                return;
+            }
+            let Some(edit) = edit(&state.value(), selection.start) else {
+                return;
+            };
+            let cursor = edit.moved(selection.start);
+            state.set_selected_range(edit.range, cx);
+            state.replace(edit.text, window, cx);
+            state.set_selected_range(cursor..cursor, cx);
+        });
     }
 
     /// Writes any pending text. Returns false if it could not be saved, in which
@@ -1195,6 +1229,14 @@ impl Render for Brouyon {
                 .on_action(cx.listener(|this, _: &NextNote, window, cx| {
                     this.step(true, window, cx);
                 }))
+                .on_action(cx.listener(|this, _: &ToggleTask, window, cx| {
+                    // Anywhere but in the note, the key keeps its usual meaning.
+                    if this.editor.focus_handle(cx).is_focused(window) {
+                        this.edit_list(lists::toggle_task, window, cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }))
                 .on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
                     this.move_to_trash(window, cx);
                 }))
@@ -2065,6 +2107,124 @@ pub(crate) mod tests {
             keys(cx, redo);
             assert_eq!(editor_text(&view, cx), "words", "{redo}");
         }
+    }
+
+    #[gpui_kit::test]
+    fn enter_starts_the_next_item_of_a_list(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        cx.simulate_input("- milk");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "- milk\n- ");
+        cx.simulate_input("eggs");
+        assert_eq!(editor_text(&view, cx), "- milk\n- eggs");
+        wait(cx, SAVE_DELAY);
+        assert_eq!(
+            note_texts(dir.path()),
+            ["- milk\n- eggs"],
+            "saved like anything typed"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn an_empty_nested_item_goes_back_a_level_then_ends_the_list(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("- a");
+        keys(cx, "shift-enter");
+        cx.simulate_input("  - b");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "- a\n  - b\n  - ");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "- a\n  - b\n- ");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "- a\n  - b\n");
+
+        // An item added between two levels belongs to the one above it.
+        keys(cx, "up up end enter");
+        cx.simulate_input("c");
+        assert_eq!(editor_text(&view, cx), "- a\n- c\n  - b\n");
+    }
+
+    #[gpui_kit::test]
+    fn numbers_and_tasks_carry_on_and_an_empty_item_ends_the_list(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("1. first");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "1. first\n2. ");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "1. first\n", "the list ended");
+
+        cx.simulate_input("- [x] done");
+        keys(cx, "enter");
+        cx.simulate_input("next");
+        assert_eq!(editor_text(&view, cx), "1. first\n- [x] done\n- [ ] next");
+    }
+
+    #[gpui_kit::test]
+    fn shift_enter_and_plain_text_get_a_plain_new_line(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("- milk");
+        keys(cx, "shift-enter");
+        assert_eq!(editor_text(&view, cx), "- milk\n");
+        cx.simulate_input("words");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "- milk\nwords\n");
+    }
+
+    #[gpui_kit::test]
+    fn undo_takes_back_the_marker_and_then_the_line(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("- milk");
+        keys(cx, "enter");
+        keys(cx, "ctrl-z");
+        assert_eq!(editor_text(&view, cx), "- milk\n");
+        keys(cx, "ctrl-z");
+        assert_eq!(editor_text(&view, cx), "- milk");
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_enter_ticks_a_task_where_the_cursor_is_and_saves_it(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        cx.simulate_input("- [ ] call the plumber");
+        keys(cx, "ctrl-enter");
+        assert_eq!(editor_text(&view, cx), "- [x] call the plumber");
+        cx.simulate_input("!");
+        assert_eq!(
+            editor_text(&view, cx),
+            "- [x] call the plumber!",
+            "the cursor stayed where it was"
+        );
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["- [x] call the plumber!"]);
+
+        keys(cx, "ctrl-enter");
+        assert_eq!(editor_text(&view, cx), "- [ ] call the plumber!");
+        keys(cx, "enter");
+        cx.simulate_input("buy milk");
+        keys(cx, "up ctrl-enter");
+        assert_eq!(
+            editor_text(&view, cx),
+            "- [x] call the plumber!\n- [ ] buy milk"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_enter_makes_a_plain_line_a_task(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.simulate_input("call the plumber");
+        keys(cx, "ctrl-enter");
+        assert_eq!(editor_text(&view, cx), "- [ ] call the plumber");
+    }
+
+    #[gpui_kit::test]
+    fn a_trashed_note_is_not_ticked(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        type_and_save(cx, "- [ ] gone");
+        keys(cx, "ctrl-shift-backspace");
+        keys(cx, "ctrl-shift-t");
+        keys(cx, "ctrl-enter");
+        keys(cx, "enter");
+        assert_eq!(editor_text(&view, cx), "- [ ] gone");
+        assert_eq!(trashed_texts(dir.path()), ["- [ ] gone"]);
     }
 
     fn set_desktop(cx: &mut VisualTestContext, change: impl FnOnce(&mut Desktop)) {

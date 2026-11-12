@@ -198,7 +198,7 @@ fn content_lines(text: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty())
 }
 
-fn is_fence(line: &str) -> bool {
+pub(crate) fn is_fence(line: &str) -> bool {
     let line = line.trim_start();
     line.starts_with("```") || line.starts_with("~~~")
 }
