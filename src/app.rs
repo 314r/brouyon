@@ -6,12 +6,12 @@ use crate::{
     desktop::{self, Desktop},
     lists, markdown,
     settings::{self, SettingsWindow},
-    store::{Note, NoteId, Store},
+    store::{self, Note, NoteId, Store},
 };
 use chrono::Datelike;
 use gpui_kit::base::{
     Tab, Tabs, VirtualListScrollHandle,
-    input::{Editor, EditorState, InputEvent, Redo},
+    input::{Editor, EditorState, InputEvent, InputState, Redo},
 };
 use gpui_kit::{
     App, Context, DispatchPhase, Entity, Focusable, FontWeight, IntoElement, MouseButton, Render,
@@ -20,7 +20,7 @@ use gpui_kit::{
 };
 use gpui_omarchy::{
     ActiveTheme, ButtonVariant, IconName, Theme, alert_dialog, button, dialog, dialog_button,
-    dialog_description, dialog_popup, dialog_title, icon, virtual_list, with_tooltip,
+    dialog_description, dialog_popup, dialog_title, icon, input, virtual_list, with_tooltip,
 };
 use std::{
     io,
@@ -33,13 +33,14 @@ use std::{
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 const KEY_CONTEXT: &str = "Brouyon";
 /// What the shortcuts overlay lists, in the order of the README's table.
-const SHORTCUTS: [(&str, &str); 11] = [
+const SHORTCUTS: [(&str, &str); 12] = [
     ("Ctrl+N", "New note"),
+    ("Ctrl+F", "Find a note"),
     ("Alt+↑ / Alt+↓", "Previous / next note"),
-    ("Ctrl+Enter", "Tick a task, or make the line one"),
+    ("Ctrl+Enter", "Tick a task"),
     ("Ctrl+Shift+Backspace", "Move to Trash"),
     ("Ctrl+Shift+T", "Switch between Notes and Trash"),
-    ("Esc", "Leave the Trash, or close Settings"),
+    ("Esc", "Stop finding, or leave the Trash"),
     ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"),
     ("Ctrl+,", "Settings"),
     ("Ctrl+Plus, Ctrl+Minus, Ctrl+0", "Text size"),
@@ -51,12 +52,13 @@ gpui_kit::actions!(
     brouyon,
     [
         NewNote,
+        FindNote,
         PreviousNote,
         NextNote,
         ToggleTask,
         MoveToTrash,
         ToggleTrash,
-        LeaveTrash,
+        GoBack,
         OpenSettings,
         IncreaseTextSize,
         DecreaseTextSize,
@@ -76,11 +78,12 @@ pub fn init(cx: &mut App) {
     let context = Some(KEY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("ctrl-n", NewNote, context),
+        KeyBinding::new("ctrl-f", FindNote, context),
         KeyBinding::new("alt-up", PreviousNote, context),
         KeyBinding::new("alt-down", NextNote, context),
         KeyBinding::new("ctrl-shift-backspace", MoveToTrash, context),
         KeyBinding::new("ctrl-shift-t", ToggleTrash, context),
-        KeyBinding::new("escape", LeaveTrash, context),
+        KeyBinding::new("escape", GoBack, context),
         KeyBinding::new("ctrl-,", OpenSettings, context),
         KeyBinding::new("ctrl-=", IncreaseTextSize, context),
         KeyBinding::new("ctrl-+", IncreaseTextSize, context),
@@ -181,6 +184,12 @@ pub struct Brouyon {
     /// Rebuilt for each note, so undo history never crosses between notes.
     editor: Entity<EditorState>,
     _editor_events: Subscription,
+    /// The field above the list. What it holds only counts while it is open.
+    filter: Entity<InputState>,
+    filter_open: bool,
+    /// The words a note has to hold to be listed, from [`store::terms`]. None lists
+    /// every note.
+    filter_terms: Vec<String>,
     /// The editor holds text that isn't on disk yet.
     dirty: bool,
     /// The last attempt to write that text failed, and `problem` says so.
@@ -206,7 +215,9 @@ impl Brouyon {
     pub fn new(store: Store, config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = build_editor("", false, window, cx);
         let editor_events = cx.subscribe_in(&editor, window, Self::on_editor_event);
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
         let subscriptions = vec![
+            cx.subscribe_in(&filter, window, Self::on_filter_event),
             cx.observe_window_activation(window, Self::on_activation),
             cx.on_app_quit(|this, cx| {
                 this.flush(cx);
@@ -230,6 +241,9 @@ impl Brouyon {
             before_trash: None,
             editor,
             _editor_events: editor_events,
+            filter,
+            filter_open: false,
+            filter_terms: Vec::new(),
             dirty: false,
             save_failed: false,
             loaded_modified: None,
@@ -294,6 +308,59 @@ impl Brouyon {
             }
             _ => {}
         }
+    }
+
+    fn on_filter_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.filter_terms = store::terms(&self.filter.read(cx).value());
+                self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            }
+            // Enter opens the first note found. With nothing to find, it goes back
+            // to the note.
+            InputEvent::PressEnter { .. } if self.filter_terms.is_empty() => {
+                self.close_filter();
+                self.focus_content(window, cx);
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => {
+                if let Some(first) = self.rows().into_iter().next() {
+                    self.select(first, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Shows the field that narrows the list down, empty, and puts the cursor in it.
+    /// Already shown, its text is selected, ready to be typed over.
+    fn open_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.filter_open {
+            self.filter_open = true;
+            self.filter_terms.clear();
+        }
+        let terms_kept = !self.filter_terms.is_empty();
+        self.filter.update(cx, |state, cx| {
+            if !terms_kept {
+                state.set_value("", window, cx);
+            }
+            state.focus(window, cx);
+            state.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Lists every note again. Whoever calls this decides where the keyboard goes.
+    fn close_filter(&mut self) {
+        self.filter_open = false;
+        self.filter_terms.clear();
     }
 
     /// Makes the edit `edit` finds for the text and the cursor, if any. It goes
@@ -370,11 +437,16 @@ impl Brouyon {
             self.loaded_modified = None;
             return;
         };
+        // A note just begun has to be in the list, whatever was being looked for.
+        if self.selection == Selection::Blank {
+            self.close_filter();
+        }
         let modified = self
             .store
             .modified(&id)
             .unwrap_or_else(|_| SystemTime::now());
-        self.notes.insert(0, Note::new(id.clone(), text, modified));
+        self.notes
+            .insert(0, Note::new(id.clone(), text.to_owned(), modified));
         self.selection = Selection::Note(id);
         self.loaded_modified = Some(modified);
         if previous_row != Some(0) {
@@ -432,6 +504,11 @@ impl Brouyon {
         if !readonly {
             self.before_trash = None;
         }
+        // What was looked for belongs to the list it was typed over, and a blank
+        // note starts afresh, as when the app opens.
+        if selection == Selection::Blank || readonly != self.selection.in_trash() {
+            self.close_filter();
+        }
         self.selection = selection;
         self.loaded_modified = modified;
         self.replace_editor(&text, readonly, window, cx);
@@ -458,6 +535,11 @@ impl Brouyon {
             return;
         }
         if self.selection == Selection::Blank && !self.dirty {
+            if self.filter_open {
+                self.close_filter();
+                self.focus_content(window, cx);
+                cx.notify();
+            }
             return;
         }
         self.select(Selection::Blank, window, cx);
@@ -520,33 +602,29 @@ impl Brouyon {
         closing
     }
 
-    fn row_count(&self) -> usize {
+    /// The rows of the list being shown, top to bottom: the notes or the trash,
+    /// narrowed down to what is being looked for. A blank note has a row of its own
+    /// above the notes, unless something is being looked for.
+    fn rows(&self) -> Vec<Selection> {
+        let found = |note: &&Note| note.matches(&self.filter_terms);
         if self.selection.in_trash() {
-            self.trash.len()
+            let trash = self.trash.iter().filter(found);
+            trash
+                .map(|note| Selection::Trashed(note.id.clone()))
+                .collect()
         } else {
-            self.notes.len() + usize::from(self.selection == Selection::Blank)
-        }
-    }
-
-    fn row_selection(&self, row: usize) -> Selection {
-        if self.selection.in_trash() {
-            Selection::Trashed(self.trash[row].id.clone())
-        } else if self.selection == Selection::Blank {
-            match row {
-                0 => Selection::Blank,
-                row => Selection::Note(self.notes[row - 1].id.clone()),
-            }
-        } else {
-            Selection::Note(self.notes[row].id.clone())
+            let blank = self.selection == Selection::Blank && self.filter_terms.is_empty();
+            let notes = self.notes.iter().filter(found);
+            blank
+                .then_some(Selection::Blank)
+                .into_iter()
+                .chain(notes.map(|note| Selection::Note(note.id.clone())))
+                .collect()
         }
     }
 
     fn selected_row(&self) -> Option<usize> {
-        match &self.selection {
-            Selection::Blank => Some(0),
-            Selection::Note(id) => self.notes.iter().position(|note| note.id == *id),
-            Selection::Trashed(id) => self.trash.iter().position(|note| note.id == *id),
-        }
+        self.rows().iter().position(|row| *row == self.selection)
     }
 
     fn reveal_selection(&self) {
@@ -556,27 +634,27 @@ impl Brouyon {
         }
     }
 
-    /// Moves through the list. Going up from the first note reaches a blank one.
+    /// Moves through the list. Going up from the first note reaches a blank one,
+    /// and going down from a note that isn't listed reaches the first that is.
     fn step(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.flush(cx) {
             return;
         }
-        let Some(row) = self.selected_row() else {
-            return;
-        };
-        let target = if down {
-            row + 1
-        } else if row > 0 {
-            row - 1
-        } else {
-            if !self.selection.in_trash() {
-                self.select(Selection::Blank, window, cx);
+        let rows = self.rows();
+        let target = match (self.selected_row(), down) {
+            (Some(row), true) => row + 1,
+            (None, true) => 0,
+            (Some(0), false) => {
+                if !self.selection.in_trash() {
+                    self.select(Selection::Blank, window, cx);
+                }
+                return;
             }
-            return;
+            (Some(row), false) => row - 1,
+            (None, false) => return,
         };
-        if target < self.row_count() {
-            let selection = self.row_selection(target);
-            self.select(selection, window, cx);
+        if let Some(selection) = rows.get(target) {
+            self.select(selection.clone(), window, cx);
         }
     }
 
@@ -638,10 +716,14 @@ impl Brouyon {
         }
     }
 
-    /// Once a note has left the trash: the first one still there, or the notes.
+    /// Once a note has left the trash: the first one still listed, or the notes.
+    /// When none of what was looked for is left, the whole trash is listed again.
     fn show_next_trashed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.trash.first().map(|note| note.id.clone()) {
-            Some(id) => self.open(Selection::Trashed(id), window, cx),
+        if self.rows().is_empty() {
+            self.close_filter();
+        }
+        match self.rows().into_iter().next() {
+            Some(next) => self.open(next, window, cx),
             None => self.show_notes(window, cx),
         }
     }
@@ -807,11 +889,8 @@ impl Brouyon {
         let t = cx.omarchy().clone();
         let in_trash = self.selection.in_trash();
         // Wide enough for a title and its date on one line, unless the editor needs it.
-        let width = if window.viewport_size().width < rems(45.).to_pixels(window.rem_size()) {
-            11.25
-        } else {
-            20.
-        };
+        let narrow = window.viewport_size().width < rems(45.).to_pixels(window.rem_size());
+        let width = if narrow { 11.25 } else { 20. };
         let tabs = Tabs::new("note-tabs")
             .flex()
             .h_full()
@@ -841,6 +920,17 @@ impl Brouyon {
                 })),
             "New note (Ctrl+N)",
         );
+        // The narrow list has no room for it beside the tabs. The key still works.
+        let find = (!narrow).then(|| {
+            with_tooltip(
+                button("find-note", "", ButtonVariant::Secondary, cx)
+                    .accessibility_label("Find a note")
+                    .debug_selector(|| "find-note".into())
+                    .child(icon(IconName::Search))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_filter(window, cx))),
+                "Find a note (Ctrl+F)",
+            )
+        });
         let header = div()
             .flex()
             .flex_shrink_0()
@@ -852,20 +942,32 @@ impl Brouyon {
             .border_b_1()
             .border_color(t.divider())
             .child(tabs)
-            .child(new_note);
+            .child(div().flex().flex_shrink_0().children(find).child(new_note));
+
+        let filter = self.filter_open.then(|| {
+            div()
+                .flex_shrink_0()
+                .p(rems(0.375))
+                .border_b_1()
+                .border_color(t.divider())
+                .child(
+                    input("note-filter", &self.filter, window, cx)
+                        .debug_selector(|| "note-filter".into())
+                        .prefix(icon(IconName::Search).size(rems(0.875))),
+                )
+        });
 
         let row_height = rems(3.25).to_pixels(window.rem_size());
-        let sizes = Rc::new(vec![
-            size(gpui_kit::Pixels::ZERO, row_height);
-            self.row_count()
-        ]);
+        let rows = Rc::new(self.rows());
+        let nothing_found = rows.is_empty() && !self.filter_terms.is_empty();
+        let sizes = Rc::new(vec![size(gpui_kit::Pixels::ZERO, row_height); rows.len()]);
         let list = virtual_list(
             cx.entity(),
             "note-list",
             sizes,
             move |this, range, _, cx| {
                 range
-                    .map(|row| this.render_row(row, row_height, cx))
+                    .filter_map(|row| Some(this.render_row(row, rows.get(row)?, row_height, cx)))
                     .collect::<Vec<_>>()
             },
             cx,
@@ -875,6 +977,16 @@ impl Brouyon {
         // gpui-omarchy gives lists the theme's solid background, which would hide
         // the window's own where it's see-through.
         .bg(transparent_black());
+        let list = if nothing_found {
+            div()
+                .px(rems(0.75))
+                .py(rems(1.))
+                .text_color(t.secondary)
+                .child("Nothing found")
+                .into_any_element()
+        } else {
+            list.into_any_element()
+        };
 
         let footer = in_trash.then(|| {
             div()
@@ -904,6 +1016,7 @@ impl Brouyon {
             .border_r_1()
             .border_color(t.divider())
             .child(header)
+            .children(filter)
             .child(div().flex_1().min_h_0().child(list))
             .children(footer)
     }
@@ -911,11 +1024,12 @@ impl Brouyon {
     fn render_row(
         &self,
         row: usize,
+        selection: &Selection,
         height: gpui_kit::Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let t = cx.omarchy().clone();
-        let selection = self.row_selection(row);
+        let selection = selection.clone();
         let selected = selection == self.selection;
         let note = match &selection {
             Selection::Note(id) => self.notes.iter().find(|note| note.id == *id),
@@ -928,10 +1042,14 @@ impl Brouyon {
                 format_date(note.modified, chrono::Local::now()).into(),
                 "".into(),
             ),
+            // While looking for something, the line it was found on says more than
+            // the one under the title.
             Some(note) => (
                 note.title.clone().into(),
                 format_date(note.modified, chrono::Local::now()).into(),
-                note.preview.clone().into(),
+                note.found_line(&self.filter_terms)
+                    .unwrap_or_else(|| note.preview.clone())
+                    .into(),
             ),
             None => ("New note".into(), "".into(), "".into()),
         };
@@ -1139,10 +1257,17 @@ impl Brouyon {
         )
     }
 
-    fn shortcuts_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn shortcuts_dialog(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         if !self.shortcuts_open {
             return None;
         }
+        // What a small window can't show at once is scrolled to. The rest of the
+        // height is the dialog's title, its padding and a margin around it.
+        let room = window.viewport_size().height - rems(7.).to_pixels(window.rem_size());
         let t = cx.omarchy().clone();
         let close = cx.listener(|this, _: &bool, window, cx| this.toggle_shortcuts(window, cx));
         let rows = SHORTCUTS.map(|(keys, action)| {
@@ -1172,7 +1297,16 @@ impl Brouyon {
                 dialog_popup(cx)
                     .w(rems(36.))
                     .child(dialog_title("Keyboard shortcuts", cx))
-                    .child(div().flex().flex_col().gap(rems(0.375)).children(rows)),
+                    .child(
+                        div()
+                            .id("shortcut-rows")
+                            .flex()
+                            .flex_col()
+                            .gap(rems(0.375))
+                            .max_h(room.max(rems(3.).to_pixels(window.rem_size())))
+                            .overflow_y_scroll()
+                            .children(rows),
+                    ),
             );
         Some(
             dialog(&self.dialog_focus, cx)
@@ -1192,7 +1326,7 @@ impl Render for Brouyon {
         let sidebar = self.sidebar(window, cx);
         let editor_pane = self.editor_pane(cx);
         let dialog = self.confirm_dialog(cx);
-        let shortcuts = self.shortcuts_dialog(cx);
+        let shortcuts = self.shortcuts_dialog(window, cx);
         let view = cx.entity().downgrade();
         let answering = self.dialog_is_open();
         let questioning = self.confirm.is_some();
@@ -1223,6 +1357,9 @@ impl Render for Brouyon {
                 root.on_action(cx.listener(|this, _: &NewNote, window, cx| {
                     this.select(Selection::Blank, window, cx);
                 }))
+                .on_action(cx.listener(|this, _: &FindNote, window, cx| {
+                    this.open_filter(window, cx);
+                }))
                 .on_action(cx.listener(|this, _: &PreviousNote, window, cx| {
                     this.step(false, window, cx);
                 }))
@@ -1243,8 +1380,12 @@ impl Render for Brouyon {
                 .on_action(cx.listener(|this, _: &ToggleTrash, window, cx| {
                     this.toggle_trash(window, cx);
                 }))
-                .on_action(cx.listener(|this, _: &LeaveTrash, window, cx| {
-                    if this.selection.in_trash() {
+                .on_action(cx.listener(|this, _: &GoBack, window, cx| {
+                    if this.filter_open {
+                        this.close_filter();
+                        this.focus_content(window, cx);
+                        cx.notify();
+                    } else if this.selection.in_trash() {
                         this.show_notes(window, cx);
                     } else {
                         cx.propagate();
@@ -2227,6 +2368,281 @@ pub(crate) mod tests {
         assert_eq!(trashed_texts(dir.path()), ["- [ ] gone"]);
     }
 
+    /// A folder of notes to look through, and one in the trash.
+    fn open_with_notes_to_find(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<Brouyon>, &mut VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".trash")).unwrap();
+        for (name, secs, text) in [
+            ("a.md", 400, "# Plumber\n\nCall about the kitchen Tap"),
+            ("b.md", 300, "Groceries\n- milk\n- tap water"),
+            ("c.md", 200, "Book list\nfrom the club"),
+            (".trash/d.md", 100, "Old plumber quote"),
+            (".trash/e.md", 50, "Old shopping list"),
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, text).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        }
+        open_with(cx, dir)
+    }
+
+    /// The titles of the rows in the list, as shown.
+    fn listed(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> Vec<String> {
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            let title = |notes: &[Note], id: &NoteId| {
+                let note = notes.iter().find(|note| note.id == *id).unwrap();
+                note.title.clone()
+            };
+            this.rows()
+                .iter()
+                .map(|row| match row {
+                    Selection::Blank => "New note".to_string(),
+                    Selection::Note(id) => title(&this.notes, id),
+                    Selection::Trashed(id) => title(&this.trash, id),
+                })
+                .collect()
+        })
+    }
+
+    fn filter_is_open(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|_, cx| view.read(cx).filter_open) && cx.debug_bounds("note-filter").is_some()
+    }
+
+    fn editor_is_focused(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| view.read(cx).editor.focus_handle(cx).is_focused(window))
+    }
+
+    fn find(cx: &mut VisualTestContext, words: &str) {
+        keys(cx, "ctrl-f");
+        cx.simulate_input(words);
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn finding_narrows_the_list_to_notes_holding_every_word(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        assert_eq!(
+            listed(&view, cx),
+            ["New note", "Plumber", "Groceries", "Book list"]
+        );
+        assert!(!filter_is_open(&view, cx));
+
+        find(cx, "tap");
+        assert!(filter_is_open(&view, cx));
+        assert_eq!(listed(&view, cx), ["Plumber", "Groceries"], "any case");
+        assert_eq!(
+            editor_text(&view, cx),
+            "",
+            "typed in the field, not the note"
+        );
+
+        cx.simulate_input(" KITCHEN");
+        cx.run_until_parked();
+        assert_eq!(listed(&view, cx), ["Plumber"], "every word");
+
+        cx.simulate_input(" nowhere");
+        cx.run_until_parked();
+        draw(cx);
+        assert!(listed(&view, cx).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn enter_opens_the_first_note_found_and_escape_lists_them_all_again(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "water");
+        keys(cx, "enter");
+        assert_eq!(selection(&view, cx), Selection::Note("b.md".into()));
+        assert!(editor_is_focused(&view, cx), "ready to edit it");
+        assert_eq!(listed(&view, cx), ["Groceries"], "still narrowed down");
+
+        keys(cx, "escape");
+        assert!(!filter_is_open(&view, cx));
+        assert_eq!(listed(&view, cx), ["Plumber", "Groceries", "Book list"]);
+        assert_eq!(selection(&view, cx), Selection::Note("b.md".into()));
+        assert!(editor_is_focused(&view, cx));
+        assert_eq!(note_texts(dir.path()).len(), 3, "nothing was written");
+    }
+
+    #[gpui_kit::test]
+    fn escape_in_the_field_stops_finding_and_goes_back_to_the_note(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "tap");
+        keys(cx, "escape");
+        assert!(!filter_is_open(&view, cx));
+        assert_eq!(
+            listed(&view, cx),
+            ["New note", "Plumber", "Groceries", "Book list"]
+        );
+        cx.simulate_input("typed in the note");
+        assert_eq!(editor_text(&view, cx), "typed in the note");
+
+        // The field comes back empty.
+        keys(cx, "ctrl-f");
+        assert_eq!(listed(&view, cx).len(), 4);
+    }
+
+    #[gpui_kit::test]
+    fn the_arrows_walk_through_what_was_found(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "tap");
+        keys(cx, "alt-down");
+        assert_eq!(selection(&view, cx), Selection::Note("a.md".into()));
+        keys(cx, "alt-down");
+        assert_eq!(selection(&view, cx), Selection::Note("b.md".into()));
+        keys(cx, "alt-down");
+        assert_eq!(
+            selection(&view, cx),
+            Selection::Note("b.md".into()),
+            "the last one found"
+        );
+        keys(cx, "alt-up");
+        assert_eq!(selection(&view, cx), Selection::Note("a.md".into()));
+    }
+
+    #[gpui_kit::test]
+    fn the_key_again_selects_the_words_to_type_over(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "tap");
+        keys(cx, "enter");
+        find(cx, "club");
+        assert_eq!(listed(&view, cx), ["Book list"]);
+    }
+
+    #[gpui_kit::test]
+    fn the_button_opens_the_field_too(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        click("find-note", cx);
+        assert!(filter_is_open(&view, cx));
+        cx.simulate_input("club");
+        cx.run_until_parked();
+        assert_eq!(listed(&view, cx), ["Book list"]);
+    }
+
+    #[gpui_kit::test]
+    fn a_new_note_lists_everything_again(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "tap");
+        keys(cx, "enter");
+        keys(cx, "ctrl-n");
+        assert!(!filter_is_open(&view, cx));
+        assert_eq!(listed(&view, cx).len(), 4);
+
+        // So does a note begun on the blank page while looking for another.
+        find(cx, "tap");
+        click_editor(cx);
+        type_and_save(cx, "A new thought");
+        assert!(!filter_is_open(&view, cx));
+        assert_eq!(
+            listed(&view, cx),
+            ["A new thought", "Plumber", "Groceries", "Book list"]
+        );
+    }
+
+    fn click_editor(cx: &mut VisualTestContext) {
+        cx.simulate_click(point(px(700.), px(300.)), Modifiers::default());
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn the_idle_move_stops_finding_too(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "tap");
+        wait(cx, IDLE);
+        assert!(!filter_is_open(&view, cx));
+        assert!(editor_is_focused(&view, cx));
+
+        find(cx, "tap");
+        keys(cx, "enter");
+        wait(cx, IDLE);
+        assert_eq!(selection(&view, cx), Selection::Blank);
+        assert!(!filter_is_open(&view, cx));
+    }
+
+    #[gpui_kit::test]
+    fn each_tab_is_looked_through_on_its_own(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        find(cx, "plumber");
+        assert_eq!(listed(&view, cx), ["Plumber"]);
+
+        click("trash-tab", cx);
+        assert!(!filter_is_open(&view, cx), "the words were for the notes");
+        assert_eq!(
+            listed(&view, cx),
+            ["Old plumber quote", "Old shopping list"]
+        );
+
+        find(cx, "shopping");
+        assert_eq!(listed(&view, cx), ["Old shopping list"]);
+        keys(cx, "enter");
+        assert_eq!(selection(&view, cx), Selection::Trashed("e.md".into()));
+
+        keys(cx, "escape");
+        assert!(
+            selection(&view, cx).in_trash(),
+            "the first Esc stops finding"
+        );
+        assert_eq!(listed(&view, cx).len(), 2);
+        keys(cx, "escape");
+        assert!(
+            !selection(&view, cx).in_trash(),
+            "the second leaves the Trash"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn deleting_the_last_note_found_in_the_trash_lists_the_rest_of_it(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open_with_notes_to_find(cx);
+        click("trash-tab", cx);
+        find(cx, "shopping");
+        keys(cx, "enter");
+        view.update_in(cx, |this, window, cx| {
+            this.ask(Confirm::DeleteForever("e.md".into()), window, cx);
+        });
+        draw(cx);
+        cx.dispatch_action(actions::Confirm { secondary: false });
+        cx.run_until_parked();
+        draw(cx);
+
+        assert_eq!(trashed_texts(dir.path()), ["Old plumber quote"]);
+        assert_eq!(selection(&view, cx), Selection::Trashed("d.md".into()));
+        assert!(!filter_is_open(&view, cx));
+    }
+
+    #[gpui_kit::test]
+    fn a_found_note_shows_the_line_it_was_found_on(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        let line = |cx: &mut VisualTestContext, id: &str| {
+            cx.update(|_, cx| {
+                let this = view.read(cx);
+                let note = this.notes.iter().find(|note| note.id == id).unwrap();
+                note.found_line(&this.filter_terms)
+            })
+        };
+        find(cx, "water");
+        assert_eq!(line(cx, "b.md").as_deref(), Some("tap water"));
+    }
+
+    #[gpui_kit::test]
+    fn finding_waits_for_an_open_question(cx: &mut TestAppContext) {
+        let (_dir, view, cx, id) = with_one_trashed_note(cx);
+        view.update_in(cx, |this, window, cx| {
+            this.ask(Confirm::DeleteForever(id), window, cx);
+        });
+        draw(cx);
+        keys(cx, "ctrl-f");
+        assert!(!filter_is_open(&view, cx));
+    }
+
     fn set_desktop(cx: &mut VisualTestContext, change: impl FnOnce(&mut Desktop)) {
         cx.update(|_, cx| change(cx.global_mut::<Desktop>()));
         cx.run_until_parked();
@@ -2492,6 +2908,33 @@ pub(crate) mod tests {
             .unwrap();
         capture(&mut cx, any_window, &out.join("02-note.png"));
 
+        let look_for =
+            |this: &mut Brouyon, words: &str, window: &mut Window, cx: &mut Context<Brouyon>| {
+                this.open_filter(window, cx);
+                this.filter
+                    .update(cx, |state, cx| state.set_value(words, window, cx));
+                this.filter_terms = store::terms(words);
+            };
+        window
+            .update(&mut cx, |this, window, cx| {
+                look_for(this, "pour", window, cx)
+            })
+            .unwrap();
+        capture(&mut cx, any_window, &out.join("02-finding.png"));
+        window
+            .update(&mut cx, |this, window, cx| {
+                look_for(this, "introuvable", window, cx)
+            })
+            .unwrap();
+        capture(&mut cx, any_window, &out.join("02-nothing-found.png"));
+        window
+            .update(&mut cx, |this, window, cx| {
+                this.close_filter();
+                this.focus_content(window, cx);
+                cx.notify();
+            })
+            .unwrap();
+
         window
             .update(&mut cx, |this, window, cx| {
                 this.problem = Some("Couldn't save: disque plein (os error 28)".into());
@@ -2595,6 +3038,19 @@ pub(crate) mod tests {
             .update(&mut cx, |this, _, cx| this.set_text_percent(100, cx))
             .unwrap();
         capture(&mut cx, narrow, &out.join("14-narrow.png"));
+        narrow_window
+            .update(&mut cx, |this, window, cx| {
+                look_for(this, "pour", window, cx)
+            })
+            .unwrap();
+        capture(&mut cx, narrow, &out.join("14-narrow-finding.png"));
+        narrow_window
+            .update(&mut cx, |this, window, cx| {
+                this.close_filter();
+                this.focus_content(window, cx);
+                cx.notify();
+            })
+            .unwrap();
         narrow_window
             .update(&mut cx, |this, window, cx| {
                 this.toggle_shortcuts(window, cx);

@@ -25,17 +25,54 @@ pub struct Note {
     /// The line under the title in the list. Empty for a note of one line.
     pub preview: String,
     pub modified: SystemTime,
+    /// Kept so that finding a note doesn't read every file again at each key.
+    text: String,
 }
 
 impl Note {
-    pub fn new(id: NoteId, text: &str, modified: SystemTime) -> Self {
+    pub fn new(id: NoteId, text: String, modified: SystemTime) -> Self {
         Self {
             id,
-            title: title_of(text),
-            preview: preview_of(text),
+            title: title_of(&text),
+            preview: preview_of(&text),
             modified,
+            text,
         }
     }
+
+    /// Whether the note holds every one of `terms`, which [`terms`] made. Their
+    /// order and place don't matter, and no terms at all match every note.
+    pub fn matches(&self, terms: &[String]) -> bool {
+        if terms.is_empty() {
+            return true;
+        }
+        let text = self.text.to_lowercase();
+        terms.iter().all(|term| text.contains(term.as_str()))
+    }
+
+    /// The first line under the title holding one of `terms`, to show why the note
+    /// was found. `None` when only the title does.
+    pub fn found_line(&self, terms: &[String]) -> Option<String> {
+        if terms.is_empty() {
+            return None;
+        }
+        content_lines(&self.text)
+            .skip(1)
+            .find(|line| {
+                let line = line.to_lowercase();
+                terms.iter().any(|term| line.contains(term.as_str()))
+            })
+            .map(|line| line.chars().take(PREVIEW_CHARS).collect())
+    }
+}
+
+/// The words to look for in notes: those of `query`, whatever their case.
+pub fn terms(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
 }
 
 pub struct Store {
@@ -170,7 +207,7 @@ fn scan(dir: &Path) -> io::Result<Vec<Note>> {
         if !metadata.is_file() {
             continue;
         }
-        notes.push(Note::new(id.to_string(), &text, metadata.modified()?));
+        notes.push(Note::new(id.to_string(), text, metadata.modified()?));
     }
     notes.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.id.cmp(&a.id)));
     Ok(notes)
@@ -490,6 +527,54 @@ mod tests {
         ] {
             assert_eq!(preview_of(text), preview, "for {text:?}");
         }
+    }
+
+    fn note(text: &str) -> Note {
+        Note::new("a.md".into(), text.into(), SystemTime::UNIX_EPOCH)
+    }
+
+    #[test]
+    fn a_note_is_found_by_every_word_in_any_order_and_case() {
+        let note = note("# Courses du Samedi\n\n- Pain\n- café moulu");
+        for (query, found) in [
+            ("", true),
+            ("   ", true),
+            ("pain", true),
+            ("PAIN", true),
+            ("samedi courses", true),
+            ("café pain", true),
+            ("CAFÉ", true),
+            ("moul", true),
+            ("pain thé", false),
+            ("dimanche", false),
+        ] {
+            assert_eq!(note.matches(&terms(query)), found, "for {query:?}");
+        }
+    }
+
+    #[test]
+    fn the_line_a_note_was_found_by_is_one_under_its_title() {
+        let note = note("# Plumber\n\nCall on Monday\n- about the **tap**\n- and the Tap again");
+        assert_eq!(
+            note.found_line(&terms("TAP")).as_deref(),
+            Some("about the **tap**")
+        );
+        assert_eq!(
+            note.found_line(&terms("plumber monday")).as_deref(),
+            Some("Call on Monday"),
+            "any of the words will do"
+        );
+        assert_eq!(note.found_line(&terms("plumber")), None, "only the title");
+        assert_eq!(note.found_line(&terms("")), None, "nothing looked for");
+    }
+
+    #[test]
+    fn a_long_found_line_is_cut_between_characters() {
+        let note = note(&format!("Title\n{}", "é".repeat(PREVIEW_CHARS * 2)));
+        assert_eq!(
+            note.found_line(&terms("é")),
+            Some("é".repeat(PREVIEW_CHARS))
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ A very simple markdown notepad for [Omarchy](https://omarchy.org), inspired by
 - Lists keep up: Enter starts the next item, and `Ctrl+Enter` ticks a task.
 - After 5 minutes without activity, Brouyon saves and moves to a new blank note.
 - Notes are listed on the left, with a tab for the Trash. There are no tags, folders
-  or archive.
+  or archive: `Ctrl+F` finds a note by the words in it.
 - Every note is a plain `.md` file. There is no database.
 - It follows your Omarchy theme, font, text size and window transparency live.
 
@@ -37,16 +37,26 @@ o.bind("SUPER + N", "Brouyon", "omarchy-launch-or-focus '^brouyon$' 'uwsm-app --
 | Key | Action |
 |---|---|
 | `Ctrl+N` | New note |
+| `Ctrl+F` | Find a note |
 | `Alt+↑` / `Alt+↓` | Previous / next note |
 | `Ctrl+Enter` | Tick a task, or make the line one |
 | `Ctrl+Shift+Backspace` | Move to Trash |
 | `Ctrl+Shift+T` | Switch between the Notes and Trash tabs |
-| `Esc` | Leave the Trash, or close Settings |
+| `Esc` | Stop finding, leave the Trash, or close Settings |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
 | `Ctrl+,` | Settings |
 | `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | Text size |
 | `F1` or `Ctrl+/` | Show these shortcuts |
 | `Ctrl+Q` | Quit |
+
+## Finding a note
+
+`Ctrl+F`, or the magnifying glass above the list, opens a field there. The list narrows
+as you type to the notes that hold every word, anywhere in their text and in any case,
+and each shows the line it was found on. Enter opens the first one, and `Alt+↓` and
+`Alt+↑` walk through the rest. `Esc` lists every note again, and so does a new note.
+
+In the Trash, the same field looks through the Trash.
 
 ## Lists
 
