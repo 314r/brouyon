@@ -281,7 +281,7 @@ fn text_scale_from(shell_toml: &str) -> Option<f32> {
     let size = value
         .as_float()
         .or_else(|| value.as_integer().map(|n| n as f64))? as f32;
-    (size > 0.).then_some(size / OMARCHY_BASELINE_FONT_SIZE)
+    (size > 0. && size.is_finite()).then_some(size / OMARCHY_BASELINE_FONT_SIZE)
 }
 
 /// Watches folders rather than files, so atomic saves and replaced folders survive.
@@ -462,6 +462,7 @@ mod tests {
         );
         assert_eq!(text_scale_from("[bar]\nsize = 3"), None);
         assert_eq!(text_scale_from("[font]\nbase-size = 0"), None);
+        assert_eq!(text_scale_from("[font]\nbase-size = inf"), None);
         assert_eq!(text_scale_from("not toml ="), None);
     }
 

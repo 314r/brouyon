@@ -10,6 +10,11 @@ use std::{
 use toml_edit::DocumentMut;
 
 const DEFAULT_IDLE_MINUTES: f64 = 5.;
+/// Shorter than this, a note would be gone between two keys.
+const MIN_IDLE: Duration = Duration::from_secs(1);
+/// A year. Longer can't be told from never, and a file can hold numbers too large
+/// for a timer to count to.
+const MAX_IDLE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// The size gpui-omarchy's metrics assume, matching Omarchy's default text size.
 const BASE_REM_SIZE: f32 = 16.;
 
@@ -73,11 +78,15 @@ impl Config {
 
     fn resolve(file: FileConfig, path: PathBuf, data_home: &Path, home: &Path) -> Self {
         let default_notes_dir = data_home.join("brouyon");
+        // Joining leaves an absolute folder as it is and puts any other under home,
+        // so notes never land in whichever folder the app was launched from.
         let notes_dir = file
             .notes_dir
-            .map(|dir| match dir.strip_prefix("~/") {
-                Some(rest) => home.join(rest),
-                None => PathBuf::from(dir),
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| match dir.strip_prefix('~') {
+                Some("") => home.to_owned(),
+                Some(rest) if rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+                _ => home.join(dir),
             })
             .unwrap_or_else(|| default_notes_dir.clone());
         let minutes = file
@@ -88,7 +97,11 @@ impl Config {
             path,
             default_notes_dir,
             notes_dir,
-            idle: (minutes > 0.).then(|| Duration::from_secs_f64(minutes * 60.)),
+            idle: (minutes > 0.).then(|| {
+                Duration::try_from_secs_f64(minutes * 60.)
+                    .unwrap_or(MAX_IDLE)
+                    .clamp(MIN_IDLE, MAX_IDLE)
+            }),
             theme: file.theme.unwrap_or_default(),
             text_percent: normalized_text_percent(
                 file.text_percent.unwrap_or(DEFAULT_TEXT_PERCENT),
@@ -145,6 +158,9 @@ impl Config {
 
     /// `None` goes back to the default folder.
     pub fn set_notes_dir(&mut self, dir: Option<PathBuf>) -> io::Result<()> {
+        self.notes_dir = dir
+            .clone()
+            .unwrap_or_else(|| self.default_notes_dir.clone());
         let value = match &dir {
             Some(dir) => Some(
                 dir.to_str()
@@ -153,14 +169,16 @@ impl Config {
             ),
             None => None,
         };
-        self.notes_dir = dir.unwrap_or_else(|| self.default_notes_dir.clone());
         self.save("notes_dir", value)
     }
 
     /// Changes one key and leaves the rest of the file as it is, comments
     /// included. A file the app couldn't read back is reported and never replaced.
     fn save(&self, key: &str, value: Option<toml_edit::Value>) -> io::Result<()> {
-        let contents = match fs::read_to_string(&self.path) {
+        // Where a link leads, so that a file kept elsewhere, such as in a dotfiles
+        // repository, is the one rewritten, rather than the link being replaced.
+        let path = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+        let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(error),
@@ -169,7 +187,13 @@ impl Config {
             .parse()
             .map_err(|error| invalid(&self.path, error))?;
         match value {
-            Some(value) => document[key] = toml_edit::Item::Value(value),
+            Some(mut value) => {
+                // The comment after a value belongs to the value.
+                if let Some(previous) = document.get(key).and_then(|item| item.as_value()) {
+                    *value.decor_mut() = previous.decor().clone();
+                }
+                document[key] = toml_edit::Item::Value(value);
+            }
             None => {
                 document.remove(key);
             }
@@ -177,9 +201,9 @@ impl Config {
         let updated = document.to_string();
         toml::from_str::<FileConfig>(&updated).map_err(|error| invalid(&self.path, error))?;
 
-        let dir = self.path.parent().unwrap_or(Path::new("."));
+        let dir = path.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(dir)?;
-        let name = self.path.file_name().and_then(|name| name.to_str());
+        let name = path.file_name().and_then(|name| name.to_str());
         write_atomically(dir, name.unwrap_or("config.toml"), &updated)
     }
 }
@@ -216,7 +240,7 @@ fn invalid(path: &Path, error: impl fmt::Display) -> io::Error {
 
 /// The nearest offered size: whole steps within the limits.
 pub fn normalized_text_percent(percent: u32) -> u32 {
-    let steps = (percent + TEXT_PERCENT_STEP / 2) / TEXT_PERCENT_STEP;
+    let steps = percent.saturating_add(TEXT_PERCENT_STEP / 2) / TEXT_PERCENT_STEP;
     (steps * TEXT_PERCENT_STEP).clamp(MIN_TEXT_PERCENT, MAX_TEXT_PERCENT)
 }
 
@@ -312,6 +336,37 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_delay_too_long_or_too_short_to_count_is_brought_within_reach() {
+        assert_eq!(resolve("idle_minutes = 1e300").idle, Some(MAX_IDLE));
+        assert_eq!(resolve("idle_minutes = 1e17").idle, Some(MAX_IDLE));
+        assert_eq!(resolve("idle_minutes = 1e-9").idle, Some(MIN_IDLE));
+        assert_eq!(
+            resolve("idle_minutes = inf").idle,
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            resolve("idle_minutes = nan").idle,
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn notes_dir_is_never_relative_to_wherever_the_app_was_launched() {
+        assert_eq!(
+            resolve(r#"notes_dir = "~""#).notes_dir,
+            PathBuf::from("/home/me")
+        );
+        assert_eq!(
+            resolve(r#"notes_dir = "Notes""#).notes_dir,
+            PathBuf::from("/home/me/Notes")
+        );
+        assert_eq!(
+            resolve(r#"notes_dir = """#).notes_dir,
+            PathBuf::from("/data/brouyon")
+        );
+    }
+
+    #[test]
     fn invalid_config_is_rejected_rather_than_half_applied() {
         assert!(toml::from_str::<FileConfig>("idle_minutes = \"soon\"").is_err());
         assert!(toml::from_str::<FileConfig>("unknown_key = 1").is_err());
@@ -324,6 +379,7 @@ mod tests {
         assert_eq!(resolve("text_percent = 135").text_percent, 140);
         assert_eq!(resolve("text_percent = 10").text_percent, 80);
         assert_eq!(resolve("text_percent = 900").text_percent, 200);
+        assert_eq!(resolve("text_percent = 4294967295").text_percent, 200);
     }
 
     #[test]
@@ -410,6 +466,45 @@ mod tests {
         assert!(text.contains("notes_dir = \"~/Notes\" # synced"), "{text}");
         assert!(text.contains("theme = \"dark\""), "{text}");
         assert!(text.contains("idle_minutes = 1"), "{text}");
+    }
+
+    #[test]
+    fn saving_keeps_the_comment_beside_the_setting_it_changes() {
+        let (_dir, mut config) = in_temp_dir(Some(
+            "theme = \"light\" # easier in the sun\nnotes_dir = \"~/Notes\" # synced\n",
+        ));
+        config.set_theme(ThemeMode::Dark).unwrap();
+        config.set_notes_dir(Some("/srv/notes".into())).unwrap();
+        assert_eq!(
+            saved(&config),
+            "theme = \"dark\" # easier in the sun\nnotes_dir = \"/srv/notes\" # synced\n"
+        );
+    }
+
+    #[test]
+    fn a_folder_whose_name_cannot_be_saved_is_still_used_this_session() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        let (_dir, mut config) = in_temp_dir(None);
+        let folder = PathBuf::from(OsStr::from_bytes(b"/srv/not\xffutf8"));
+        assert!(config.set_notes_dir(Some(folder.clone())).is_err());
+        assert_eq!(config.notes_dir, folder);
+    }
+
+    #[test]
+    fn a_settings_file_that_is_a_link_stays_one() {
+        let (dir, mut config) = in_temp_dir(None);
+        let real = dir.path().join("dotfiles/config.toml");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "# kept in a repository\nidle_minutes = 5\n").unwrap();
+        fs::create_dir_all(config.path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &config.path).unwrap();
+
+        config.set_theme(ThemeMode::Dark).unwrap();
+        assert!(fs::symlink_metadata(&config.path).unwrap().is_symlink());
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "# kept in a repository\nidle_minutes = 5\ntheme = \"dark\"\n"
+        );
     }
 
     #[test]

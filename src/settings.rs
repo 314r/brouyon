@@ -493,6 +493,9 @@ impl Render for SettingsWindow {
                 }
             }))
             .on_action(|_: &CloseSettings, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &Quit, _, cx| {
+                this.app.update(cx, |app, cx| app.quit(cx));
+            }))
             .child(sidebar)
             .child(
                 div()
@@ -726,6 +729,16 @@ mod tests {
         assert!(cx.simulate_close());
         cx.run_until_parked();
         assert!(!is_open(settings, cx));
+    }
+
+    #[gpui_kit::test]
+    fn quitting_from_settings_shows_a_failed_save_first(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let (_settings, mut settings_cx) = open_settings(&view, cx);
+        fs::remove_dir_all(dir.path()).unwrap();
+        cx.simulate_input("precious");
+        closing_keys("ctrl-q", &mut settings_cx);
+        cx.update(|_, cx| assert!(view.read(cx).has_problem()));
     }
 
     #[gpui_kit::test]

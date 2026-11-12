@@ -67,6 +67,7 @@ gpui_kit::actions!(
 pub fn init(cx: &mut App) {
     use gpui_kit::KeyBinding;
     desktop::init(cx);
+    // Only reached when no window is there to answer, which each does by saving first.
     cx.on_action(|_: &Quit, cx| cx.quit());
     // Scoped to the app's context: a binding with no context would outrank the
     // editor's and the dialog's, so Escape would skip past an open question.
@@ -178,6 +179,8 @@ pub struct Brouyon {
     _editor_events: Subscription,
     /// The editor holds text that isn't on disk yet.
     dirty: bool,
+    /// The last attempt to write that text failed, and `problem` says so.
+    save_failed: bool,
     /// The open file's modified time as last read or written, to notice changes
     /// made outside the app.
     loaded_modified: Option<SystemTime>,
@@ -224,6 +227,7 @@ impl Brouyon {
             editor,
             _editor_events: editor_events,
             dirty: false,
+            save_failed: false,
             loaded_modified: None,
             problem: None,
             settings_problem: None,
@@ -301,12 +305,14 @@ impl Brouyon {
         match saved {
             Ok(saved) => {
                 self.dirty = false;
+                self.save_failed = false;
                 self.problem = None;
                 self.record_save(saved, &text);
                 cx.notify();
                 true
             }
             Err(error) => {
+                self.save_failed = true;
                 self.problem = Some(format!("Couldn't save: {error}").into());
                 cx.notify();
                 false
@@ -453,11 +459,23 @@ impl Brouyon {
         cx.notify();
     }
 
-    /// The first close attempt after a failed save keeps the window open so the
-    /// error can be seen. A second attempt closes anyway.
+    /// Saves before the window goes. The first attempt to leave after a failed save
+    /// is refused so the error can be seen, and a second one is let through. Only a
+    /// failed save counts: another problem on screen says nothing about this text.
+    fn may_leave(&mut self, cx: &mut Context<Self>) -> bool {
+        let already_warned = self.save_failed;
+        self.flush(cx) || already_warned
+    }
+
+    /// Quitting skips the window's own close, so it asks the same question.
+    pub fn quit(&mut self, cx: &mut Context<Self>) {
+        if self.may_leave(cx) {
+            cx.quit();
+        }
+    }
+
     fn on_close(&mut self, cx: &mut Context<Self>) -> bool {
-        let already_warned = self.problem.is_some();
-        let closing = self.flush(cx) || already_warned;
+        let closing = self.may_leave(cx);
         if closing && let Some(settings) = self.settings_window {
             // The app runs until its last window closes, and Settings can't
             // outlive the window it belongs to.
@@ -1159,6 +1177,7 @@ impl Render for Brouyon {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.restart_idle_timer(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
             // The key that opens the shortcuts closes them too, but a question comes first.
             .when(!questioning, |root| {
                 root.on_action(cx.listener(|this, _: &ToggleShortcuts, window, cx| {
@@ -1336,6 +1355,10 @@ impl Brouyon {
 
     pub fn has_question(&self) -> bool {
         self.confirm.is_some()
+    }
+
+    pub fn has_problem(&self) -> bool {
+        self.problem.is_some()
     }
 }
 
@@ -2117,6 +2140,34 @@ pub(crate) mod tests {
         wait(cx, IDLE);
         assert_eq!(note_texts(dir.path()), ["precious"]);
         cx.update(|_, cx| assert!(view.read(cx).problem.is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn quitting_shows_a_failed_save_before_it_lets_go(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        fs::remove_dir_all(dir.path()).unwrap();
+        cx.simulate_input("precious");
+        keys(cx, "ctrl-q");
+        cx.update(|_, cx| {
+            let problem = view.read(cx).problem.clone().expect("the save was tried");
+            assert!(problem.contains("Couldn't save"), "{problem}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn closing_shows_a_failed_save_even_after_another_problem(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        type_and_save(cx, "first");
+        fs::remove_dir_all(dir.path()).unwrap();
+        keys(cx, "ctrl-shift-backspace");
+        cx.update(|_, cx| {
+            let problem = view.read(cx).problem.clone().unwrap();
+            assert!(problem.contains("Couldn't move to Trash"), "{problem}");
+        });
+
+        cx.simulate_input(" and more");
+        assert!(!cx.simulate_close(), "this failure hasn't been seen yet");
+        assert!(cx.simulate_close(), "a second attempt closes anyway");
     }
 
     #[gpui_kit::test]

@@ -107,9 +107,13 @@ impl Store {
         Ok(target)
     }
 
-    /// Permanently deletes one trashed note.
+    /// Permanently deletes one trashed note. One that something else already
+    /// deleted is as gone as was asked.
     pub fn purge(&self, id: &str) -> io::Result<()> {
-        fs::remove_file(self.trash.join(id))
+        match fs::remove_file(self.trash.join(id)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Permanently deletes every trashed note.
@@ -418,6 +422,16 @@ mod tests {
         store.empty_trash().unwrap();
         assert!(store.list_trash().unwrap().is_empty());
         assert_eq!(store.read(&kept).unwrap(), "kept");
+    }
+
+    #[test]
+    fn purging_a_note_that_is_already_gone_is_not_a_failure() {
+        let (dir, store) = store();
+        fs::write(dir.path().join(".trash/one.md"), "one").unwrap();
+        fs::write(dir.path().join(".trash/two.md"), "two").unwrap();
+        fs::remove_file(dir.path().join(".trash/one.md")).unwrap();
+        store.purge("one.md").unwrap();
+        assert_eq!(store.list_trash().unwrap().len(), 1);
     }
 
     #[test]
