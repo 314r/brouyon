@@ -2672,7 +2672,6 @@ dependencies = [
 [[package]]
 name = "gpui-omarchy"
 version = "0.2.1"
-source = "git+https://github.com/huacnlee/gpui-omarchy?rev=8c3fbcfc32ad47943c4a1cacf57c7ff8e9f22b42#8c3fbcfc32ad47943c4a1cacf57c7ff8e9f22b42"
 dependencies = [
  "async-channel",
  "chrono",
@@ -2680,6 +2679,7 @@ dependencies = [
  "itertools 0.13.0",
  "notify 7.0.0",
  "num-traits",
+ "serde_json",
  "toml 0.8.23",
 ]
 

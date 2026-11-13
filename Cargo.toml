@@ -41,3 +41,6 @@ strip = true
 # this has to be repeated from gpui-omarchy's manifest.
 [profile.release.package.gpui-pre-macros]
 debug-assertions = true
+
+[patch."https://github.com/huacnlee/gpui-omarchy"]
+gpui-omarchy = { path = "../gpui-omarchy" }
