@@ -1,0 +1,26 @@
+# Read by tools/third-party-licenses; run it after changing anything here or any dependency.
+project = "Brouyon"
+
+# Licenses shipped components may use. deny.toml's [licenses] allow, when present, wins.
+allow = ["0BSD", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BlueOak-1.0.0", "BSD-2-Clause", "BSD-3-Clause", "BSL-1.0", "CC-BY-4.0", "CC0-1.0", "CDLA-Permissive-2.0", "CC-BY-3.0", "HPND", "ISC", "MIT", "MIT-0", "MIT-CMU", "MPL-2.0", "OFL-1.1", "PSF-2.0", "Python-2.0", "Unicode-3.0", "Unicode-DFS-2016", "Unlicense", "Zlib"]
+
+[cargo]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+# binaries = ["name"]          # default: every binary in the workspace
+
+# Vendored code, icons, fonts... one block each; their texts go in LICENSES/.
+# [[component]]
+# name = "Lucide"
+# version = "0.468.0"
+# source = "https://lucide.dev"
+# spdx = "ISC"
+# files = ["LICENSES/ISC-lucide.txt"]
+# paths = ["assets/icons"]
+
+[[component]]
+# DesktopWatcher in src/desktop.rs is adapted from gpui-omarchy's palette watcher.
+name = "gpui-omarchy folder watcher"
+source = "https://github.com/huacnlee/gpui-omarchy"
+spdx = "MIT"
+files = ["LICENSES/MIT-gpui-omarchy.txt"]
+paths = ["src/desktop.rs"]
