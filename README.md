@@ -11,7 +11,7 @@ A very simple markdown notepad for [Omarchy](https://omarchy.org), inspired by
 - Notes are listed on the left, with a tab for the Trash. There are no tags, folders
   or archive: `Ctrl+F` finds a note by the words in it.
 - Every note is a plain `.md` file. There is no database.
-- It follows your Omarchy theme, font, text size and window transparency live.
+- It follows your Omarchy theme, font, text size, window transparency and corners live.
 
 ## Install
 
@@ -88,10 +88,10 @@ The gear at the bottom right, or `Ctrl+,`, opens a floating window for the theme
 text size, the notes folder and the delay before a blank note. Moving to another folder
 leaves existing notes where they are.
 
-The Light and Dark themes only set the colours. Window transparency, the font and the
-text size always follow the desktop, whichever theme you pick. Under Omarchy's Glassy
-setting, Brouyon's background goes see-through like a terminal's while its text stays
-solid, and dialogs stay opaque.
+The Light and Dark themes only set the colours. Window transparency, the corners, the
+font and the text size always follow the desktop, whichever theme you pick. Under
+Omarchy's Glassy setting, Brouyon's background goes see-through like a terminal's while
+its text stays solid, and dialogs stay opaque.
 
 Brouyon saves your choices in `~/.config/brouyon/config.toml`, which you can also edit
 by hand. Your comments are kept, and a file Brouyon can't read is reported rather than

@@ -340,8 +340,8 @@ impl SettingsWindow {
                     .child(row().children(themes))
                     .child(description(
                         "Omarchy follows the current desktop theme and its changes. Light and \
-                         Dark only set the colours: window transparency, the font and the text \
-                         size still follow the desktop.",
+                         Dark only set the colours: window transparency, the corners, the font \
+                         and the text size still follow the desktop.",
                         cx,
                     )),
             )

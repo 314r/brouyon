@@ -1,6 +1,6 @@
-//! What Brouyon follows from the desktop besides the palette, which gpui-omarchy
-//! already follows: Omarchy's window transparency, the text size and the monospace
-//! font. All of it applies live, and Brouyon only ever reads it.
+//! What Brouyon follows from the desktop besides the palette and the corners, which
+//! gpui-omarchy already follows: Omarchy's window transparency, the text size and the
+//! monospace font. All of it applies live, and Brouyon only ever reads it.
 
 use crate::config::{home_dir, xdg_dir};
 use gpui_kit::{App, Global, Hsla, SharedString, Window, WindowBackgroundAppearance};

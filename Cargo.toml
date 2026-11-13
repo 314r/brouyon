@@ -6,9 +6,11 @@ description = "Quick-capture markdown notes for Omarchy"
 license = "MIT"
 
 [dependencies]
-# Pinned to main until a release built on gpui-kit 0.9 reaches crates.io. The
-# published 0.2.1 requires gpui-kit 0.7, and the two versions must match.
-gpui-omarchy = { git = "https://github.com/huacnlee/gpui-omarchy", rev = "8c3fbcfc32ad47943c4a1cacf57c7ff8e9f22b42" }
+# Pinned to a fork's commit until huacnlee/gpui-omarchy#24, which rounds corners
+# like Hyprland's windows, is merged; then back to upstream. No release built on
+# gpui-kit 0.9 has reached crates.io yet: 0.2.1 requires gpui-kit 0.7, and the two
+# versions must match.
+gpui-omarchy = { git = "https://github.com/314r/gpui-omarchy", rev = "efeb5bea07bee8d869e20d3411c66a9974c5d1c2" }
 gpui-kit = { version = "0.9.0", default-features = false, features = ["assets"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 chrono = "0.4"
@@ -41,6 +43,3 @@ strip = true
 # this has to be repeated from gpui-omarchy's manifest.
 [profile.release.package.gpui-pre-macros]
 debug-assertions = true
-
-[patch."https://github.com/huacnlee/gpui-omarchy"]
-gpui-omarchy = { path = "../gpui-omarchy" }
