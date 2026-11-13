@@ -1,0 +1,7 @@
+#!/bin/sh
+# Rewrites THIRD-PARTY-LICENSES.txt, the license and notice texts of everything the
+# release ships. Run it after any change to Cargo.lock or tools/third-party-licenses.toml.
+set -eu
+
+cd "$(dirname "$0")/.."
+python3 tools/third-party-licenses

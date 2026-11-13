@@ -441,7 +441,19 @@ impl SettingsWindow {
                     .child(description(
                         "Quick notes in Markdown, always on a blank page.",
                         cx,
-                    )),
+                    ))
+                    .child(concat!("Made by ", env!("CARGO_PKG_AUTHORS"), "."))
+                    .child(
+                        row().child(
+                            labelled_button(
+                                "source-code",
+                                "Source code",
+                                IconName::ExternalLink,
+                                cx,
+                            )
+                            .on_click(|_, _, cx| cx.open_url(env!("CARGO_PKG_REPOSITORY"))),
+                        ),
+                    ),
             )
             .child(section("Thanks to", cx).child(description(
                 "GPUI, gpui-kit and gpui-omarchy for the interface, Omarchy for the look, \
@@ -805,6 +817,19 @@ mod tests {
         click("section-About", &mut settings_cx);
         assert!(settings_cx.debug_bounds("open-folder").is_none());
         assert!(settings_cx.debug_bounds("theme-Light").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn about_links_to_the_source_code(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let (_settings, mut settings_cx) = open_settings(&view, cx);
+
+        click("section-About", &mut settings_cx);
+        click("source-code", &mut settings_cx);
+        assert_eq!(
+            settings_cx.opened_url().as_deref(),
+            Some("https://github.com/314r/brouyon")
+        );
     }
 
     #[gpui_kit::test]

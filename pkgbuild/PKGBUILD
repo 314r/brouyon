@@ -5,6 +5,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc='Quick-capture markdown notes for Omarchy'
 arch=('x86_64')
+url='https://github.com/314r/brouyon'
 license=('MIT')
 # The first three are linked. Wayland and Vulkan are loaded at run time, fontconfig
 # answers which font is current, and the portal is the folder picker.
@@ -26,7 +27,7 @@ build() {
 package() {
   cd "$startdir/.."
   install -Dm755 target/release/brouyon "$pkgdir/usr/bin/brouyon"
-  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 LICENSE THIRD-PARTY-LICENSES.txt -t "$pkgdir/usr/share/licenses/$pkgname"
   install -Dm644 "$startdir/brouyon.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/brouyon.svg"
   install -Dm644 "$startdir/brouyon.desktop" "$pkgdir/usr/share/applications/brouyon.desktop"
 }

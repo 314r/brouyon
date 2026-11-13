@@ -1,0 +1,696 @@
+#!/usr/bin/env python3
+"""Write THIRD-PARTY-LICENSES.txt: the license and notice texts of everything a release ships.
+
+tools/third-party-licenses.toml names the project and where its components come from: Rust crates
+(cargo), Go modules, npm packages, Python packages, vendored files listed by hand, and the Arch
+system libraries it links (listed for reference). Run it after any dependency change; `--check`
+fails when the file no longer matches. It needs Python 3.11 and each ecosystem's own tool, reads
+sources from their local caches, and so works offline once the project has been built.
+
+Adapted from Flea's tools/flea-third-party-licenses, Copyright (c) 2026 GM, under the MIT License.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+
+OUTPUT = "THIRD-PARTY-LICENSES.txt"
+CONFIG = "tools/third-party-licenses.toml"
+LEGAL = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
+CODE = {".c", ".cc", ".cjs", ".cpp", ".css", ".go", ".h", ".hpp", ".html", ".java", ".js", ".json",
+        ".map", ".mjs", ".py", ".pyc", ".rs", ".ts", ".tsx", ".jsx"}
+DEFAULT_ALLOW = ["0BSD", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BlueOak-1.0.0", "BSD-2-Clause",
+                 "BSD-3-Clause", "BSL-1.0", "CC-BY-4.0", "CC0-1.0", "CDLA-Permissive-2.0", "CC-BY-3.0", "HPND", "ISC", "MIT",
+                 "MIT-0", "MIT-CMU", "MPL-2.0", "OFL-1.1", "PSF-2.0", "Python-2.0", "Unicode-3.0", "Unicode-DFS-2016",
+                 "Unlicense", "Zlib"]
+# Sections in the order they are written; pacman's system libraries are not shipped, so their
+# licenses are listed but neither checked against the allowed list nor counted as package licenses.
+SECTIONS = (("cargo", "CRATES"), ("go", "GO MODULES"), ("npm", "NPM PACKAGES"),
+            ("python", "PYTHON PACKAGES"), ("component", "VENDORED COMPONENTS"),
+            ("pacman", "SYSTEM LIBRARIES"))
+NOT_SHIPPED = {"pacman"}
+
+
+# "MIT OR Apache-2.0", "(MIT AND Zlib) OR ISC" and "MIT/Apache-2.0" parse; "MIT OR" and "(MIT" raise ValueError.
+def alternatives(expression):
+    """The license sets an SPDX expression allows, one per OR branch; Cargo's older `/` means OR."""
+    expression = expression.replace("/", " OR ")
+    tokens = re.findall(r"\(|\)|[A-Za-z0-9.+-]+", expression)
+    if not tokens or re.sub(r"\s+", "", expression) != "".join(tokens):
+        raise ValueError(f"invalid SPDX expression: {expression}")
+    position = 0
+
+    def term():
+        nonlocal position
+        if position == len(tokens):
+            raise ValueError(f"incomplete SPDX expression: {expression}")
+        token = tokens[position]
+        position += 1
+        if token == "(":
+            result = either()
+            if position == len(tokens) or tokens[position] != ")":
+                raise ValueError(f"unclosed SPDX expression: {expression}")
+            position += 1
+            return result
+        if token in {"AND", "OR", "WITH", ")"}:
+            raise ValueError(f"unexpected SPDX token: {token}")
+        if position < len(tokens) and tokens[position] == "WITH":
+            position += 1
+            if position == len(tokens) or tokens[position] in {"AND", "OR", "WITH", "(", ")"}:
+                raise ValueError(f"missing SPDX exception: {expression}")
+            token += " WITH " + tokens[position]
+            position += 1
+        return [frozenset([token])]
+
+    def both():
+        nonlocal position
+        result = term()
+        while position < len(tokens) and tokens[position] == "AND":
+            position += 1
+            right = term()
+            result = [a | b for a in result for b in right]
+        return result
+
+    def either():
+        nonlocal position
+        result = both()
+        while position < len(tokens) and tokens[position] == "OR":
+            position += 1
+            result += both()
+        return result
+
+    result = either()
+    if position != len(tokens):
+        raise ValueError(f"unexpected SPDX suffix: {expression}")
+    return result
+
+
+def preferred(choices):
+    return min(choices, key=lambda c: ("MIT" not in c, "Apache-2.0" not in c, len(c), sorted(c)))
+
+
+def chosen_license(expression, allowed, who):
+    """The allowed alternative, preferring MIT, then Apache-2.0, then the fewest terms."""
+    if not expression:
+        raise ValueError(f"{who} has no SPDX license; set one in {CONFIG}")
+    choices = [choice for choice in alternatives(expression) if choice <= allowed]
+    if not choices:
+        raise ValueError(f"{who}: {expression} is not among the allowed licenses")
+    return preferred(choices)
+
+
+# Phrases that identify a license text, checked on lowercased text with comment marks and line
+# breaks folded away. Copyleft families are recognized only to be refused: their version and
+# "or later" choice must be read by a person and written in the config.
+SIGNATURES = (
+    ("Apache-2.0", ("apache license", "version 2.0"), ()),
+    ("MPL-2.0", ("mozilla public license", "2.0"), ()),
+    ("copyleft:AGPL", ("gnu affero general public license version 3",), ()),
+    ("copyleft:LGPL", ("gnu lesser general public license version",), ()),
+    ("copyleft:LGPL", ("gnu library general public license version",), ()),
+    ("copyleft:GPL", ("gnu general public license version",), ()),
+    ("copyleft:GPL", ("general public license as published by the free software foundation",), ()),
+    ("Unlicense", ("this is free and unencumbered software released into the public domain",), ()),
+    ("CC0-1.0", ("cc0 1.0 universal",), ()),
+    ("BSL-1.0", ("boost software license - version 1.0",), ()),
+    ("Zlib", ("altered source versions must be plainly marked as such",
+              "permission is granted to anyone to use this software for any purpose"), ()),
+    ("ISC", ("permission to use, copy, modify, and/or distribute this software for any purpose",
+             "the above copyright notice and this permission notice appear in all copies"), ()),
+    ("0BSD", ("permission to use, copy, modify, and/or distribute this software for any purpose",),
+     ("the above copyright notice and this permission notice appear",)),
+    ("MIT", ("permission is hereby granted, free of charge, to any person obtaining a copy",), ()),
+    ("BSD-3-Clause", ("redistribution and use in source and binary forms", "endorse or promote"), ()),
+    ("BSD-2-Clause", ("redistribution and use in source and binary forms",), ("endorse or promote",)),
+)
+
+
+def detect(text):
+    folded = " ".join(line.strip().lstrip("#*/;!>-").strip() for line in text.lower().splitlines())
+    folded = re.sub(r"\s+", " ", folded)
+    return {spdx for spdx, needed, absent in SIGNATURES
+            if all(p in folded for p in needed) and not any(p in folded for p in absent)}
+
+
+def is_primary(label):
+    return re.fullmatch(r"(LICEN[CS]E|COPYING|UNLICENSE)([-_.][A-Z0-9.-]+)?", Path(label).name.upper())
+
+
+def detected_expression(files, who):
+    """An SPDX expression read from license texts: dual LICENSE-X files mean OR, anything else AND.
+
+    LICENSE, COPYING and their LICENSE-MIT-style variants decide; NOTICE files and bundled
+    third-party notices, which often only mention other licenses, count only when nothing else does.
+    """
+    primary = [(path, label) for path, label in files if is_primary(label)]
+    found = {}
+    for path, label in primary or files:
+        ids = detect(read_text(path))
+        if ids:
+            found[label] = ids
+    copyleft = sorted({i.split(":")[1] for ids in found.values() for i in ids if i.startswith("copyleft:")})
+    if copyleft:
+        raise ValueError(f"{who} looks like {'/'.join(copyleft)}; read its license and, if it may ship"
+                         f" with this project, set its SPDX expression in {CONFIG}")
+    if not found:
+        raise ValueError(f"{who}: no recognizable license text; read it and set its SPDX in {CONFIG}")
+    ids = sorted({i for ids in found.values() for i in ids})
+    dual = all(re.match(r"(LICEN[CS]E|COPYING)[-_.]", Path(label).name.upper()) and len(v) == 1
+               for label, v in found.items())
+    return (" OR " if dual and len(found) > 1 else " AND ").join(ids)
+
+
+def read_text(path):
+    raw = path.read_bytes()
+    if b"\0" in raw:
+        raise ValueError(f"not a text file: {path}")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def is_legal(path):
+    return path.name.upper().startswith(LEGAL) and path.suffix.lower() not in CODE
+
+
+def legal_files(directory, recursive=True, skip=(".git", "target")):
+    files = []
+    for base, directories, names in os.walk(directory):
+        directories[:] = sorted(d for d in directories if d not in skip)
+        in_legal_directory = any(part.upper().startswith(LEGAL) for part in Path(base).relative_to(directory).parts)
+        for name in sorted(names):
+            path = Path(base) / name
+            if (is_legal(path) or in_legal_directory) and path.is_file() and path.suffix.lower() not in CODE:
+                files.append(path)
+        if not recursive and not in_legal_directory:
+            directories[:] = [d for d in directories if d.upper().startswith(LEGAL)]
+    return files
+
+
+def run(command, root, env=None):
+    tool = shutil.which(command[0])
+    if not tool:
+        raise ValueError(f"{command[0]} is not installed")
+    result = subprocess.run([tool, *command[1:]], cwd=root, check=True, stdout=subprocess.PIPE,
+                            env=dict(os.environ, **(env or {})))
+    return result.stdout.decode("utf-8")
+
+
+def digest_of(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def joined(words):
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+class Report:
+    def __init__(self, root, config, config_path):
+        self.root, self.config = root, config
+        self.records = {key: {} for key, _ in SECTIONS}
+        self.texts, self.licenses = {}, set()
+        self.hashes, self.targets, self.scopes = [], [], []
+        deny = root / "deny.toml"
+        allow = None
+        if deny.is_file():
+            allow = tomllib.loads(deny.read_text()).get("licenses", {}).get("allow")
+            self.allowed_by = "deny.toml"
+        if allow is None:
+            allow = config.get("allow")
+            self.allowed_by = config_path
+        if allow is None:
+            raise ValueError(f"no allowed licenses: add allow = [...] to {config_path}")
+        self.allowed = set(allow)
+
+    def add_text(self, path, owner, label):
+        raw = path.read_bytes()
+        text = read_text(path)
+        if not text.strip():
+            raise ValueError(f"empty license or notice: {path}")
+        digest = hashlib.sha256(raw).hexdigest()
+        entry = self.texts.setdefault(digest, {"text": text, "owners": set()})
+        entry["owners"].add(f"{owner}: {label}")
+        return digest
+
+    def record(self, section, key, title, lines, files, selected=None, target=None):
+        record = self.records[section].setdefault(key, {"title": title, "lines": lines, "targets": set(),
+                                                         "texts": set(), "selected": selected})
+        if target:
+            record["targets"].add(target)
+        for path, label in files:
+            record["texts"].add(self.add_text(path, title, label))
+        if selected and section not in NOT_SHIPPED:
+            self.licenses.update(selected)
+
+    def expression(self, section, name, declared, files, who):
+        override = self.config.get(section, {}).get("licenses", {}).get(name)
+        if override:
+            return override
+        if declared:
+            try:
+                alternatives(declared)
+                return declared
+            except ValueError:
+                pass
+        return detected_expression(files, who)
+
+    # Rust: the normal dependencies of the workspace's binaries, per target, from cargo's cache.
+    def cargo(self, settings):
+        targets = settings.get("targets", ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"])
+        wanted, binaries = set(settings.get("binaries", [])), set()
+        for target in targets:
+            metadata = json.loads(run([os.environ.get("CARGO", "cargo"), "metadata", "--locked", "--offline",
+                                       "--format-version", "1", "--filter-platform", target], self.root))
+            packages = {package["id"]: package for package in metadata["packages"]}
+            nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+            members = set(metadata["workspace_members"])
+            roots = []
+            for pid in members:
+                bins = [t["name"] for t in packages[pid]["targets"] if "bin" in t["kind"]
+                        and (not wanted or t["name"] in wanted)]
+                if bins:
+                    roots.append(pid)
+                    binaries.update(bins)
+            if not roots:
+                raise ValueError("the workspace has no binaries" + (f" named {sorted(wanted)}" if wanted else ""))
+            pending, seen = list(roots), set()
+            while pending:
+                pid = pending.pop()
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                pending.extend(dep["pkg"] for dep in nodes[pid]["deps"]
+                               if any(kind["kind"] is None for kind in dep["dep_kinds"]))
+            for package in (packages[pid] for pid in seen - members):
+                name, version, source = package["name"], package["version"], package["source"]
+                owner = f"{name} {version} ({source})"
+                expression = self.config["cargo"].get("licenses", {}).get(name) or package.get("license")
+                if not expression:
+                    raise ValueError(f"{name} {version} has no SPDX license; set one under [cargo.licenses]")
+                selected = chosen_license(expression, self.allowed, f"{name} {version}")
+                lines = [crate_source(name, version, source), "SPDX: " + expression.replace("/", " OR "),
+                         "Selected: " + " AND ".join(sorted(selected))]
+                self.record("cargo", (name, version, source), owner, lines, crate_notices(package),
+                            selected, target)
+        self.hashes.append("Cargo.lock SHA256: " + digest_of(self.root / "Cargo.lock"))
+        self.targets.append(("Rust", targets))
+        self.scopes.append("Normal dependencies of " + joined([f"bin/{b}" for b in sorted(binaries)])
+                           + ", proc macros included; build and dev dependencies excluded.")
+
+    # Go: the modules of the packages built, per GOOS/GOARCH, from the module cache.
+    def go(self, settings):
+        targets = settings.get("targets", ["linux/amd64", "linux/arm64"])
+        patterns = settings.get("packages", ["./..."])
+        for target in targets:
+            goos, _, goarch = target.partition("/")
+            output = run(["go", "list", "-deps", "-json=Module,Standard", *patterns], self.root,
+                         {"GOOS": goos, "GOARCH": goarch})
+            decoder, position, modules = json.JSONDecoder(), 0, {}
+            while position < len(output):
+                if output[position].isspace():
+                    position += 1
+                    continue
+                package, position = decoder.raw_decode(output, position)
+                module = package.get("Module")
+                if package.get("Standard") or not module or module.get("Main"):
+                    continue
+                modules[(module["Path"], module.get("Version", ""))] = module
+            for (path, version), module in modules.items():
+                actual = module.get("Replace") or module
+                directory = actual.get("Dir") or module.get("Dir")
+                if not directory or not Path(directory).is_dir():
+                    raise ValueError(f"source of {path} {version} is not available; run go mod download")
+                directory = Path(directory)
+                files = [(p, p.relative_to(directory).as_posix())
+                         for p in legal_files(directory, skip=(".git", "testdata"))]
+                title = f"{path} {version}".strip()
+                expression = self.expression("go", path, None, files, title)
+                selected = chosen_license(expression, self.allowed, title)
+                if actual.get("Version"):
+                    escaped = re.sub(r"[A-Z]", lambda m: "!" + m.group().lower(), actual["Path"])
+                    source = f"Source: https://proxy.golang.org/{escaped}/@v/{actual['Version']}.zip"
+                else:
+                    source = f"Source: local directory {actual.get('Path', directory)}"
+                lines = [source, "SPDX: " + expression, "Selected: " + " AND ".join(sorted(selected))]
+                self.record("go", (path, version), title, lines, files, selected, target)
+        self.hashes.append("go.sum SHA256: " + digest_of(self.root / "go.sum"))
+        self.targets.append(("Go", targets))
+        self.scopes.append(f"Modules of the Go packages {' '.join(patterns)}; test dependencies excluded.")
+
+    # npm: the packages package-lock.json resolves, read from node_modules.
+    def npm(self, settings):
+        lock = json.loads((self.root / "package-lock.json").read_text())
+        packages = lock.get("packages")
+        if not packages:
+            raise ValueError("package-lock.json has no packages map; regenerate it with npm 7 or later")
+        dev = settings.get("dev", False)
+        for key, entry in sorted(packages.items()):
+            if "node_modules/" not in key or entry.get("link"):
+                continue
+            if not dev and (entry.get("dev") or entry.get("devOptional")):
+                continue
+            directory = self.root / key
+            name = entry.get("name") or key.rsplit("node_modules/", 1)[1]
+            if not directory.is_dir():
+                if entry.get("optional") or entry.get("peer"):
+                    continue
+                raise ValueError(f"{name} is not installed at {key}; run npm ci")
+            manifest = json.loads((directory / "package.json").read_text())
+            version = entry.get("version") or manifest.get("version", "")
+            declared = entry.get("license") or manifest.get("license")
+            if isinstance(declared, dict):
+                declared = declared.get("type")
+            if not declared and isinstance(manifest.get("licenses"), list):
+                declared = " OR ".join(item.get("type", "") for item in manifest["licenses"])
+            files = [(p, p.relative_to(directory).as_posix())
+                     for p in legal_files(directory, skip=(".git", "node_modules"))]
+            title = f"{name} {version}"
+            expression = self.expression("npm", name, declared, files, title)
+            selected = chosen_license(expression, self.allowed, title)
+            lines = ["Source: " + (entry.get("resolved") or f"https://www.npmjs.com/package/{name}/v/{version}"),
+                     "SPDX: " + expression, "Selected: " + " AND ".join(sorted(selected))]
+            self.record("npm", (name, version), title, lines, files, selected)
+        self.hashes.append("package-lock.json SHA256: " + digest_of(self.root / "package-lock.json"))
+        self.scopes.append("npm packages in package-lock.json, "
+                           + ("devDependencies included, since the bundle ships them."
+                              if dev else "devDependencies excluded."))
+
+    # Python: the runtime dependencies, read from the project's virtualenv.
+    def python(self, settings):
+        interpreter = self.root / settings.get("interpreter", ".venv/bin/python")
+        if not interpreter.exists():
+            raise ValueError(f"{interpreter} does not exist; create the virtualenv (uv sync) or set interpreter")
+        installed = {}
+        for dist in json.loads(run([str(interpreter), "-I", "-c", PYTHON_SNIPPET], self.root)):
+            installed.setdefault(normalized(dist["name"]), dist)
+        wanted = []
+        if (self.root / "uv.lock").is_file():
+            exported = run(["uv", "export", "--frozen", "--no-dev", "--no-hashes", "--no-emit-project",
+                            "--no-header", "--no-annotate", "--format", "requirements-txt"], self.root)
+            for line in exported.splitlines():
+                match = re.match(r"([A-Za-z0-9._-]+)(\[[^\]]*\])?==\S+\s*(;.*)?$", line.strip())
+                if not match:
+                    continue
+                name = normalized(match.group(1))
+                if name in installed:
+                    wanted.append(name)
+                elif not match.group(3):
+                    raise ValueError(f"{name} is not installed in {interpreter.parent.parent}; run uv sync")
+            self.hashes.append("uv.lock SHA256: " + digest_of(self.root / "uv.lock"))
+            self.scopes.append("Python packages uv.lock needs at run time; development groups excluded.")
+        else:
+            own = ""
+            if (self.root / "pyproject.toml").is_file():
+                own = tomllib.loads((self.root / "pyproject.toml").read_text()).get("project", {}).get("name", "")
+            wanted = [n for n in installed if n not in {"pip", "setuptools", "wheel", normalized(own)}]
+            self.scopes.append(f"Every Python package installed in {settings.get('interpreter', '.venv')},"
+                               " except pip, setuptools, wheel and the project itself.")
+        for name in sorted(set(wanted)):
+            dist = installed[name]
+            files = [(Path(p), Path(p).name) for p in dist["files"] if Path(p).is_file()]
+            title = f"{dist['name']} {dist['version']}"
+            expression = self.config["python"].get("licenses", {}).get(dist["name"]) or dist["expression"]
+            if not expression:
+                try:
+                    expression = detected_expression(files, title)
+                except ValueError:
+                    expression = classifier_license(dist["classifiers"]) or dist["license"]
+                    if not expression or "\n" in expression:
+                        raise
+            selected = chosen_license(expression, self.allowed, title)
+            lines = [f"Source: https://pypi.org/project/{dist['name']}/{dist['version']}/",
+                     "SPDX: " + expression, "Selected: " + " AND ".join(sorted(selected))]
+            self.record("python", (name, dist["version"]), title, lines, files, selected)
+
+    # Arch packages linked at run time: listed, not shipped.
+    def pacman(self, settings):
+        names = settings.get("packages", [])
+        if not names:
+            raise ValueError("[pacman] lists no packages; --suggest-pacman BINARY finds them")
+        overrides = settings.get("licenses", {})
+        output = run(["pacman", "-Qi", *names], self.root, {"LC_ALL": "C"})
+        for block in output.strip().split("\n\n"):
+            fields, last = {}, None
+            for line in block.splitlines():
+                if line[:1].isspace() and last:
+                    fields[last] += " " + line.strip()
+                elif ":" in line:
+                    last, _, value = line.partition(":")
+                    last = last.strip()
+                    fields[last] = value.strip()
+            name, version = fields["Name"], fields["Version"]
+            packaged = [] if fields.get("Licenses", "None") == "None" else fields["Licenses"].split()
+            directory = Path("/usr/share/licenses") / name
+            override = overrides.get(name)
+            selected = preferred(alternatives(override)) if override else None
+            # The LGPL-3.0 is a set of additions to the GPL-3.0, so it travels with the GPL's text.
+            wanted = set(selected or packaged) | ({"GPL-3.0-only"} if any(
+                s.startswith("LGPL-3.0") for s in selected or packaged) else set())
+            files = []
+            installed = sorted(p for p in directory.rglob("*") if p.is_file()) if directory.is_dir() else []
+            for path in installed:
+                named_for = path.stem if path.suffix == ".txt" else path.name
+                if selected is None or named_for not in packaged or named_for in wanted:
+                    files.append((path, path.relative_to(directory).as_posix()))
+            for spdx in sorted(wanted):
+                common = Path("/usr/share/licenses/spdx") / f"{spdx}.txt"
+                if not (directory / f"{spdx}.txt").is_file() and common.is_file():
+                    files.append((common, f"/usr/share/licenses/spdx/{spdx}.txt"))
+            title = f"{name} {version} (Arch package)"
+            lines = ["Source: " + fields.get("URL", "None"), "Licenses (as packaged): " + " ".join(packaged)]
+            if override:
+                lines.append("Used under: " + override)
+            self.record("pacman", (name, version), title, lines, files, selected)
+        self.scopes.append("System libraries are linked at run time from Arch packages and not shipped;"
+                           " they are listed for reference.")
+
+    # Code, icons, fonts and other files copied into the repository.
+    def component(self, components):
+        for item in components:
+            name, version = item["name"], item.get("version", "")
+            title = f"{name} {version}".strip()
+            paths = [self.root / p for p in item.get("files", [])]
+            if not paths:
+                raise ValueError(f"{title}: list its license text under files (put it in LICENSES/)")
+            missing = [str(p) for p in paths if not p.is_file()]
+            if missing:
+                raise ValueError(f"{title}: missing license file {', '.join(missing)}")
+            selected = chosen_license(item.get("spdx"), self.allowed, title)
+            lines = ["Source: " + item.get("source", "this repository")]
+            if item.get("paths"):
+                lines.append("In this repository: " + " ".join(item["paths"]))
+            lines += ["SPDX: " + item["spdx"], "Selected: " + " AND ".join(sorted(selected))]
+            files = [(p, p.relative_to(self.root).as_posix()) for p in paths]
+            self.record("component", (name, version), title, lines, files, selected)
+        self.scopes.append("Vendored components are files copied into this repository, listed in " + CONFIG + ".")
+
+    def render(self, project, own_license):
+        self.add_text(self.root / own_license, project, own_license)
+        used = [key for key, _ in SECTIONS if self.records[key]]
+        shipped = [key for key in used if key not in NOT_SHIPPED]
+        noun = "crate" if used == ["cargo"] else "component"
+        lines = [f"{project}: third-party licenses and notices",
+                 "Generated by tools/third-party-licenses; do not edit."]
+        if shipped:
+            lines.append("Package licenses: " + " ".join(sorted(self.licenses)))
+        lines += self.hashes
+        for language, targets in self.targets:
+            label = "Targets" if len(self.targets) == 1 else f"{language} targets"
+            lines.append(f"{label}: " + " ".join(targets))
+        lines += self.scopes
+        if shipped:
+            lines += [f"Where a {noun} offers a choice, MIT is selected, then Apache-2.0, among the licenses"
+                      f" {self.allowed_by} allows.",
+                      f"Every license and notice text a {noun} supplies is kept, including those of unselected"
+                      " alternatives.",
+                      f"The source of every {noun}, MPL-2.0 ones included, is available from the address"
+                      " below its name."]
+        lines.append("")
+        for key, heading in SECTIONS:
+            if not self.records[key]:
+                continue
+            lines += [heading, ""]
+            for _, record in sorted(self.records[key].items()):
+                lines += [record["title"], *record["lines"]]
+                if record["targets"]:
+                    lines.append("Targets: " + " ".join(sorted(record["targets"])))
+                lines += ["Texts: " + " ".join(sorted(record["texts"]))] if record["texts"] else [
+                    f"No license or notice file supplied by this {noun}; see its SPDX expression above."
+                    if key != "pacman" else "No license file installed by this package; see its licenses above."]
+                lines.append("")
+        lines += ["LICENSE AND NOTICE TEXTS", ""]
+        for digest, entry in sorted(self.texts.items()):
+            lines += ["=" * 72, "Text SHA256: " + digest, "Covers:"]
+            lines += ["  " + owner for owner in sorted(entry["owners"])]
+            lines += ["", entry["text"], ""]
+        return "\n".join(lines)
+
+
+PYTHON_SNIPPET = r"""
+import json, sys
+from importlib import metadata
+LEGAL = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
+out = []
+for dist in metadata.distributions():
+    files = []
+    for f in dist.files or []:
+        parts = f.parts
+        if len(parts) > 1 and parts[0].endswith(".dist-info") and (
+                "licenses" in parts[1:-1] or parts[-1].upper().startswith(LEGAL)):
+            files.append(str(dist.locate_file(f)))
+    meta = dist.metadata
+    out.append({"name": meta["Name"], "version": dist.version, "expression": meta.get("License-Expression"),
+                "license": meta.get("License"), "classifiers": meta.get_all("Classifier") or [],
+                "files": sorted(files)})
+json.dump(out, sys.stdout)
+"""
+
+CLASSIFIERS = {"MIT License": "MIT", "Apache Software License": "Apache-2.0", "ISC License (ISCL)": "ISC",
+               "Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0", "The Unlicense (Unlicense)": "Unlicense",
+               "Python Software Foundation License": "PSF-2.0", "zlib/libpng License": "Zlib",
+               "Boost Software License 1.0 (BSL-1.0)": "BSL-1.0"}
+
+
+def classifier_license(classifiers):
+    found = sorted({CLASSIFIERS[c.split(" :: ")[-1]] for c in classifiers
+                    if c.startswith("License ::") and c.split(" :: ")[-1] in CLASSIFIERS})
+    return " OR ".join(found) if found else None
+
+
+def normalized(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def crate_notices(package):
+    """Each license or notice file in the crate, and, for a crate inside a git checkout, the checkout's own."""
+    directory = Path(package["manifest_path"]).parent
+    if not directory.is_dir():
+        raise ValueError(f"crate source is not available: {directory}; run cargo fetch")
+    files = [(path, path.relative_to(directory).as_posix()) for path in legal_files(directory)]
+    explicit = package.get("license_file")
+    if explicit:
+        path = directory / explicit
+        if not path.is_file():
+            raise ValueError(f"missing license-file for {package['name']}: {explicit}")
+        files.append((path, explicit))
+    if package["source"].startswith("git+") and not (directory / ".git").exists():
+        for ancestor in directory.parents:
+            files.extend((path, "checkout/" + path.relative_to(ancestor).as_posix())
+                         for path in legal_files(ancestor, recursive=False))
+            if (ancestor / ".git").exists():
+                break
+            if ancestor.parent == ancestor:
+                raise ValueError(f"cannot find the git checkout of {package['name']}")
+    return files
+
+
+def crate_source(name, version, source):
+    if source.startswith("registry+") and "crates.io" in source:
+        return f"Source: https://crates.io/api/v1/crates/{name}/{version}/download"
+    if source.startswith("git+"):
+        url, _, revision = source[len("git+"):].partition("#")
+        return f"Source: {url.split('?')[0]} at revision {revision}"
+    return f"Source: {source}"
+
+
+def suggest_pacman(binaries):
+    """The Arch packages owning the shared libraries the given binaries link directly (DT_NEEDED)."""
+    libraries = set()
+    for binary in binaries:
+        needed = set(re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", run(["readelf", "-d", binary], Path.cwd(), {"LC_ALL": "C"})))
+        for line in run(["ldd", binary], Path.cwd(), {"LC_ALL": "C"}).splitlines():
+            match = re.match(r"\s*(\S+)\s+=>\s*(/\S+)", line)
+            if match and match.group(1) in needed:
+                libraries.add(os.path.realpath(match.group(2)))
+    if not libraries:
+        return []
+    # pacman exits 1 when some library belongs to no package (a build folder's own); keep the rest.
+    owners = subprocess.run(["pacman", "-Qqo", *sorted(libraries)], stdout=subprocess.PIPE,
+                            env=dict(os.environ, LC_ALL="C")).stdout.decode().split()
+    base = {"glibc", "gcc-libs", "libgcc", "libstdc++", "libgomp", "lib32-glibc", "lib32-gcc-libs"}
+    return sorted(set(owners) - base)
+
+
+def init(root, path, project):
+    if path.exists():
+        raise ValueError(f"{path} already exists")
+    found = [name for name, marker in (("cargo", "Cargo.lock"), ("go", "go.sum"), ("npm", "package-lock.json"),
+                                       ("python", "pyproject.toml")) if (root / marker).is_file()]
+    native = any((root / m).is_file() for m in ("CMakeLists.txt", "meson.build")) or any(root.glob("*.pro"))
+    text = [f"# Read by tools/third-party-licenses; run it after changing anything here or any dependency.",
+            f'project = "{project}"', "",
+            "# Licenses shipped components may use. deny.toml's [licenses] allow, when present, wins.",
+            "allow = [" + ", ".join(f'"{a}"' for a in DEFAULT_ALLOW) + "]", ""]
+    if "cargo" in found:
+        text += ["[cargo]", 'targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]',
+                 '# binaries = ["name"]          # default: every binary in the workspace', ""]
+    if "go" in found:
+        text += ["[go]", 'packages = ["./..."]', 'targets = ["linux/amd64", "linux/arm64"]',
+                 '# licenses = { "example.com/module" = "MIT" }', ""]
+    if "npm" in found:
+        text += ["[npm]", "dev = false   # true when a bundler (Vite, esbuild...) ships devDependencies",
+                 '# licenses = { "package" = "MIT" }', ""]
+    if "python" in found:
+        text += ["[python]", 'interpreter = ".venv/bin/python"', '# licenses = { "Package" = "MIT" }', ""]
+    if native:
+        text += ["# The system libraries the binary links; tools/third-party-licenses --suggest-pacman BINARY",
+                 "[pacman]", "packages = []", '# licenses = { "qt6-base" = "LGPL-3.0-only" }', ""]
+    text += ["# Vendored code, icons, fonts... one block each; their texts go in LICENSES/.",
+             "# [[component]]", '# name = "Lucide"', '# version = "0.468.0"', '# source = "https://lucide.dev"',
+             '# spdx = "ISC"', '# files = ["LICENSES/ISC-lucide.txt"]', '# paths = ["assets/icons"]', ""]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(text))
+    return found + (["pacman"] if native else [])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--check", action="store_true", help=f"fail if {OUTPUT} is stale")
+    parser.add_argument("--init", metavar="PROJECT", help=f"write a starter {CONFIG} for the named project")
+    parser.add_argument("--suggest-pacman", nargs="+", metavar="BINARY",
+                        help="print the Arch packages whose libraries the binaries load")
+    parser.add_argument("--root", type=Path, help="the project (default: this script's parent's parent)")
+    parser.add_argument("--config", type=Path, help=f"default: ROOT/{CONFIG}")
+    parser.add_argument("--output", type=Path, help=f"default: ROOT/{OUTPUT}")
+    args = parser.parse_args()
+    root = (args.root or Path(__file__).resolve().parent.parent).resolve()
+    config_path = args.config or root / CONFIG
+    if args.suggest_pacman:
+        print("\n".join(suggest_pacman(args.suggest_pacman)))
+        return
+    if args.init:
+        found = init(root, config_path, args.init)
+        print(f"WROTE {config_path}: {', '.join(found) or 'no ecosystem found; add [[component]] blocks'}")
+        return
+    if not config_path.is_file():
+        raise ValueError(f"{config_path} is missing; create it with --init PROJECT")
+    config = tomllib.loads(config_path.read_text())
+    shown = config_path.relative_to(root).as_posix() if config_path.is_relative_to(root) else config_path.name
+    report = Report(root, config, shown)
+    for key, _ in SECTIONS:
+        if key in config:
+            getattr(report, key)(config[key])
+    content = report.render(config["project"], config.get("license", "LICENSE"))
+    output = args.output or root / config.get("output", OUTPUT)
+    if args.check:
+        if not output.is_file() or output.read_bytes() != content.encode("utf-8"):
+            raise ValueError(f"{output.name} is stale; run make licenses")
+    else:
+        output.write_bytes(content.encode("utf-8"))
+    print(f"{'PASS' if args.check else 'WROTE'} {output.name}: {len(content.encode('utf-8'))} bytes; "
+          f"package licenses: {' '.join(sorted(report.licenses))}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+        sys.exit(f"FAIL third-party licenses: {error}")

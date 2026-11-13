@@ -6,5 +6,5 @@ Exec=omarchy-launch-or-focus "^brouyon\\$" "uwsm-app -- brouyon"
 Icon=brouyon
 Terminal=false
 Categories=Utility;TextEditor;
-Keywords=notes;markdown;draft;brouillon;
+Keywords=notes;markdown;brouillon;
 StartupWMClass=brouyon

@@ -1,6 +1,8 @@
 #!/bin/sh
-# Runs the tests, none of which open a window or touch real notes.
+# Runs the tests, none of which open a window or touch real notes, then checks that
+# THIRD-PARTY-LICENSES.txt still matches Cargo.lock (bin/licenses rewrites it).
 set -eu
 
 cd "$(dirname "$0")/.."
 cargo test "$@"
+python3 tools/third-party-licenses --check

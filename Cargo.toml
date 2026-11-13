@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Quick-capture markdown notes for Omarchy"
 license = "MIT"
+authors = ["Pierre Svaert (314r)"]
+repository = "https://github.com/314r/brouyon"
 
 [dependencies]
 # Pinned to a fork's commit until huacnlee/gpui-omarchy#24, which rounds corners
