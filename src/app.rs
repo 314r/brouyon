@@ -6,7 +6,9 @@ use crate::{
     desktop::{self, Desktop},
     lists, markdown,
     settings::{self, SettingsWindow},
+    shortcuts::{self, primary},
     store::{self, Note, NoteId, Store},
+    title_bar::{self, BAR_HEIGHT, TitleBar},
 };
 use chrono::Datelike;
 use gpui_kit::base::{
@@ -34,23 +36,7 @@ use std::{
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 /// How long the strip under the note says that it was copied.
 const COPIED_NOTICE: Duration = Duration::from_secs(2);
-const KEY_CONTEXT: &str = "Brouyon";
-/// What the shortcuts overlay lists, in the order of the README's table.
-const SHORTCUTS: [(&str, &str); 13] = [
-    ("Ctrl+N", "New note"),
-    ("Ctrl+F", "Find a note"),
-    ("Alt+↑ / Alt+↓", "Previous / next note"),
-    ("Ctrl+Enter", "Tick a task"),
-    ("Ctrl+Shift+C", "Copy the note"),
-    ("Ctrl+Shift+Backspace", "Move to Trash"),
-    ("Ctrl+Shift+T", "Switch between Notes and Trash"),
-    ("Esc", "Stop finding, or leave the Trash"),
-    ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"),
-    ("Ctrl+,", "Settings"),
-    ("Ctrl+Plus, Ctrl+Minus, Ctrl+0", "Text size"),
-    ("F1", "These shortcuts"),
-    ("Ctrl+Q", "Quit"),
-];
+pub(crate) const KEY_CONTEXT: &str = "Brouyon";
 
 gpui_kit::actions!(
     brouyon,
@@ -69,6 +55,7 @@ gpui_kit::actions!(
         DecreaseTextSize,
         ResetTextSize,
         ToggleShortcuts,
+        CloseWindow,
         Quit
     ]
 );
@@ -82,28 +69,29 @@ pub fn init(cx: &mut App) {
     // editor's and the dialog's, so Escape would skip past an open question.
     let context = Some(KEY_CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("ctrl-n", NewNote, context),
-        KeyBinding::new("ctrl-f", FindNote, context),
+        KeyBinding::new(primary!("n"), NewNote, context),
+        KeyBinding::new(primary!("f"), FindNote, context),
         KeyBinding::new("alt-up", PreviousNote, context),
         KeyBinding::new("alt-down", NextNote, context),
-        KeyBinding::new("ctrl-shift-c", CopyNote, context),
-        KeyBinding::new("ctrl-shift-backspace", MoveToTrash, context),
-        KeyBinding::new("ctrl-shift-t", ToggleTrash, context),
+        KeyBinding::new(primary!("shift-c"), CopyNote, context),
+        KeyBinding::new(primary!("shift-backspace"), MoveToTrash, context),
+        KeyBinding::new(primary!("shift-t"), ToggleTrash, context),
         KeyBinding::new("escape", GoBack, context),
-        KeyBinding::new("ctrl-,", OpenSettings, context),
-        KeyBinding::new("ctrl-=", IncreaseTextSize, context),
-        KeyBinding::new("ctrl-+", IncreaseTextSize, context),
-        KeyBinding::new("ctrl--", DecreaseTextSize, context),
-        KeyBinding::new("ctrl-0", ResetTextSize, context),
+        KeyBinding::new(primary!(","), OpenSettings, context),
+        KeyBinding::new(primary!("="), IncreaseTextSize, context),
+        KeyBinding::new(primary!("+"), IncreaseTextSize, context),
+        KeyBinding::new(primary!("-"), DecreaseTextSize, context),
+        KeyBinding::new(primary!("0"), ResetTextSize, context),
         // Typing `?` has to reach the note. F1 is here too because `/` takes Shift on
         // some layouts, such as AZERTY.
         KeyBinding::new("f1", ToggleShortcuts, context),
-        KeyBinding::new("ctrl-/", ToggleShortcuts, context),
-        KeyBinding::new("ctrl-q", Quit, context),
-        // gpui-base only binds Ctrl+Y on Linux. `Input` is its editor's key context.
-        KeyBinding::new("ctrl-shift-z", Redo, Some("Input")),
+        KeyBinding::new(primary!("/"), ToggleShortcuts, context),
+        KeyBinding::new(primary!("q"), Quit, context),
+        // On Linux gpui-base only binds Ctrl+Y, and on macOS it already binds this
+        // one. `Input` is its editor's key context.
+        KeyBinding::new(primary!("shift-z"), Redo, Some("Input")),
         // In that context to come before the editor's own use of the key, a newline.
-        KeyBinding::new("ctrl-enter", ToggleTask, Some("Input")),
+        KeyBinding::new(primary!("enter"), ToggleTask, Some("Input")),
     ]);
     settings::bind_keys(cx);
 
@@ -145,9 +133,22 @@ pub fn apply_theme(mode: ThemeMode, cx: &mut App) {
     use_mono_font(cx);
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_os = "macos")))]
 fn follow_desktop_theme(cx: &mut App) {
     Theme::follow_system(cx);
+}
+
+/// A Mac has no Omarchy theme, so the palette follows its light or dark appearance.
+/// `macos::follow_appearance` applies it again when that changes.
+#[cfg(all(not(test), target_os = "macos"))]
+fn follow_desktop_theme(cx: &mut App) {
+    use gpui_kit::WindowAppearance;
+    match cx.window_appearance() {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => {
+            Theme::flexoki_light().apply(cx);
+        }
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme::tokyo_night().apply(cx),
+    }
 }
 
 /// The same palette, without watching the real home folder. Any file changing there
@@ -221,6 +222,7 @@ pub struct Brouyon {
     /// Held by whichever dialog is open.
     dialog_focus: gpui_kit::FocusHandle,
     list_scroll: VirtualListScrollHandle,
+    title_bar: TitleBar,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -273,6 +275,7 @@ impl Brouyon {
             shortcuts_open: false,
             dialog_focus: cx.focus_handle(),
             list_scroll: VirtualListScrollHandle::new(),
+            title_bar: TitleBar::default(),
             _subscriptions: subscriptions,
         };
         this.reload_lists();
@@ -616,6 +619,13 @@ impl Brouyon {
         }
     }
 
+    /// Closes the window from a key or a menu, as its own button would.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.on_close(cx) {
+            window.remove_window();
+        }
+    }
+
     fn on_close(&mut self, cx: &mut Context<Self>) -> bool {
         let closing = self.may_leave(cx);
         if closing && let Some(settings) = self.settings_window {
@@ -951,7 +961,14 @@ impl Brouyon {
         let in_trash = self.selection.in_trash();
         // Wide enough for a title and its date on one line, unless the editor needs it.
         let narrow = is_narrow(window);
-        let width = if narrow { 11.25 } else { 20. };
+        let rem = window.rem_size();
+        let mut width = rems(if narrow { 11.25 } else { 20. }).to_pixels(rem);
+        // On macOS the window's buttons take the header's left, which the narrow
+        // list needs for its tabs. They replace its padding.
+        let buttons = self.title_bar.buttons_width(window);
+        if narrow && let Some(buttons) = buttons {
+            width += buttons - rems(0.75).to_pixels(rem);
+        }
         let tabs = Tabs::new("note-tabs")
             .flex()
             .h_full()
@@ -979,7 +996,7 @@ impl Brouyon {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.select(Selection::Blank, window, cx);
                 })),
-            "New note (Ctrl+N)",
+            format!("New note ({})", shortcuts::NEW_NOTE),
         );
         // The narrow list has no room for it beside the tabs. The key still works.
         let find = (!narrow).then(|| {
@@ -989,20 +1006,33 @@ impl Brouyon {
                     .debug_selector(|| "find-note".into())
                     .child(icon(IconName::Search))
                     .on_click(cx.listener(|this, _, window, cx| this.open_filter(window, cx))),
-                "Find a note (Ctrl+F)",
+                format!("Find a note ({})", shortcuts::FIND_NOTE),
             )
         });
+        // Under the window's buttons, and between the tabs and the header's own, the
+        // header moves the window as a title bar would.
+        let under_buttons = buttons.map(|buttons| {
+            self.title_bar
+                .drag_area()
+                .flex_shrink_0()
+                .w(buttons)
+                .h_full()
+        });
+        let between = buttons.map(|_| self.title_bar.drag_area().flex_1().h_full());
         let header = div()
             .flex()
             .flex_shrink_0()
             .items_center()
             .justify_between()
-            .h(rems(2.75))
+            .h(rems(BAR_HEIGHT))
             .pl(rems(0.75))
             .pr(rems(0.125))
             .border_b_1()
             .border_color(t.divider())
+            .when(under_buttons.is_some(), |header| header.pl_0())
+            .children(under_buttons)
             .child(tabs)
+            .children(between)
             .child(div().flex().flex_shrink_0().children(find).child(new_note));
 
         let filter = self.filter_open.then(|| {
@@ -1057,7 +1087,7 @@ impl Brouyon {
                 .debug_selector(|| "settings".into())
                 .child(icon(IconName::Settings))
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            "Settings (Ctrl+,)",
+            format!("Settings ({})", shortcuts::SETTINGS),
         );
         let empty_trash = in_trash.then(|| {
             button("empty-trash", "Empty Trash", ButtonVariant::Outline, cx)
@@ -1071,7 +1101,7 @@ impl Brouyon {
             .flex_shrink_0()
             .items_center()
             .justify_between()
-            .h(rems(2.75))
+            .h(rems(BAR_HEIGHT))
             // The gear's own padding sets its icon in line with the titles.
             .pl(rems(0.0625))
             .pr(rems(0.5))
@@ -1084,7 +1114,7 @@ impl Brouyon {
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(rems(width))
+            .w(width)
             .h_full()
             .border_r_1()
             .border_color(t.divider())
@@ -1192,7 +1222,20 @@ impl Brouyon {
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         editor.update(cx, |state, cx| state.focus(window, cx));
                     })
-                    .child(div().size_full().child(Editor::new(&self.editor))),
+                    .child(div().size_full().child(Editor::new(&self.editor)))
+                    // Above the note, the window's top edge moves it, as a title bar
+                    // would on macOS.
+                    .when(title_bar::DRAWN, |pane| {
+                        pane.relative().child(
+                            self.title_bar
+                                .drag_area()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(rems(1.25)),
+                        )
+                    }),
             )
             .child(self.status_strip(window, cx))
     }
@@ -1222,7 +1265,7 @@ impl Brouyon {
                     .debug_selector(|| "move-to-trash".into())
                     .child(icon(IconName::Trash))
                     .on_click(cx.listener(|this, _, window, cx| this.move_to_trash(window, cx))),
-                "Move to Trash (Ctrl+Shift+Backspace)",
+                format!("Move to Trash ({})", shortcuts::MOVE_TO_TRASH),
             )),
             Selection::Trashed(id) => {
                 let restore = id.clone();
@@ -1286,7 +1329,7 @@ impl Brouyon {
             .items_center()
             .justify_between()
             .gap(rems(0.75))
-            .h(rems(2.75))
+            .h(rems(BAR_HEIGHT))
             // In line with the note's text: the status, or the copy button's icon,
             // which the button's own padding sets in.
             .pl(rems(if copying { 0.8125 } else { 1.5 }))
@@ -1333,7 +1376,7 @@ impl Brouyon {
                     this.copy_note(format, cx);
                     this.focus_content(window, cx);
                 })),
-            format!("{label} (Ctrl+Shift+C)"),
+            format!("{label} ({})", shortcuts::COPY_NOTE),
         );
         let trigger = button("copy-as", "", ButtonVariant::Secondary, cx)
             .accessibility_label("Choose what to copy")
@@ -1454,7 +1497,7 @@ impl Brouyon {
         let room = window.viewport_size().height - rems(7.).to_pixels(window.rem_size());
         let t = cx.omarchy().clone();
         let close = cx.listener(|this, _: &bool, window, cx| this.toggle_shortcuts(window, cx));
-        let rows = SHORTCUTS.map(|(keys, action)| {
+        let rows = shortcuts::ALL.map(|(keys, action)| {
             div()
                 .flex()
                 .gap(rems(1.))
@@ -1503,6 +1546,8 @@ impl Brouyon {
 impl Render for Brouyon {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(px(self.config.rem_px(cx.global::<Desktop>().text_scale)));
+        self.title_bar
+            .place_buttons(rems(BAR_HEIGHT).to_pixels(window.rem_size()), window);
         let t = cx.omarchy().clone();
         let style = markdown::editor_style(&t);
         self.editor
@@ -1530,6 +1575,7 @@ impl Render for Brouyon {
                 this.restart_idle_timer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close(window, cx)))
             // The key that opens the shortcuts closes them too, but a question comes first.
             .when(!questioning, |root| {
                 root.on_action(cx.listener(|this, _: &ToggleShortcuts, window, cx| {
@@ -1794,8 +1840,17 @@ pub(crate) mod tests {
         wait(cx, SAVE_DELAY);
     }
 
+    /// The tests press shortcuts with Linux's Ctrl, which is ⌘ on macOS.
+    pub(crate) fn on_this_system(keystrokes: &str) -> String {
+        if cfg!(target_os = "macos") {
+            keystrokes.replace("ctrl-", "cmd-")
+        } else {
+            keystrokes.to_owned()
+        }
+    }
+
     pub(crate) fn keys(cx: &mut VisualTestContext, keystrokes: &str) {
-        cx.simulate_keystrokes(keystrokes);
+        cx.simulate_keystrokes(&on_this_system(keystrokes));
         cx.run_until_parked();
         draw(cx);
     }
@@ -2452,7 +2507,13 @@ pub(crate) mod tests {
     fn both_redo_keys_bring_back_what_undo_took(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         cx.simulate_input("words");
-        for redo in ["ctrl-shift-z", "ctrl-y"] {
+        // Linux also has Ctrl+Y. macOS only has ⇧⌘Z.
+        let redo_keys: &[&str] = if cfg!(target_os = "macos") {
+            &["ctrl-shift-z"]
+        } else {
+            &["ctrl-shift-z", "ctrl-y"]
+        };
+        for &redo in redo_keys {
             keys(cx, "ctrl-z");
             assert_eq!(editor_text(&view, cx), "", "before {redo}");
             keys(cx, redo);

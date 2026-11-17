@@ -1,9 +1,36 @@
 #!/bin/sh
-# Builds Brouyon as an Arch package and installs it, which puts it in the Omarchy
-# launcher. Run it again to update. pacman asks for your password.
+# Builds Brouyon and installs it. Run it again to update.
+#
+# On Omarchy it becomes an Arch package, which puts it in the launcher, and pacman asks
+# for your password. On macOS it becomes Brouyon.app, in your Applications folder.
 set -eu
 
-cd "$(dirname "$0")/../pkgbuild"
+cd "$(dirname "$0")/.."
+
+if [ "$(uname -s)" = Darwin ]; then
+    bin/build
+    app=target/release/Brouyon.app
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cp target/release/brouyon "$app/Contents/MacOS/"
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    sed "s/@VERSION@/$version/g" macos/Info.plist >"$app/Contents/Info.plist"
+    cp macos/brouyon.icns LICENSE THIRD-PARTY-LICENSES.txt "$app/Contents/Resources/"
+    # Signed for this Mac alone: Apple silicon runs nothing unsigned, and a signature
+    # that works on other Macs needs an Apple developer account.
+    codesign --force --sign - "$app"
+
+    # The shared folder takes an administrator's account, and the user's own any other.
+    applications=/Applications
+    [ -w "$applications" ] || applications="$HOME/Applications"
+    mkdir -p "$applications"
+    rm -rf "$applications/Brouyon.app"
+    cp -R "$app" "$applications/"
+    echo "Installed in $applications. Open Brouyon from Launchpad or Spotlight."
+    exit
+fi
+
+cd pkgbuild
 makepkg -fsi "$@"
 
 # Brouyon used to install itself by hand. A user's own desktop entry and icon override

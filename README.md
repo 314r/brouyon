@@ -71,6 +71,21 @@ installs it with what it needs, so pacman asks for your password. The first buil
 minutes, and then Brouyon is in the Omarchy launcher. To update, `git pull` and run the last
 line again. `sudo pacman -R brouyon` removes it and leaves your notes alone.
 
+On macOS, with [Xcode](https://developer.apple.com/xcode/) and [mise](https://mise.jdx.dev):
+
+```bash
+git clone https://github.com/314r/brouyon.git
+cd brouyon
+mise install
+mise exec -- bin/install
+```
+
+`bin/install` builds `Brouyon.app` and copies it to your Applications folder. Xcode compiles
+what draws the window: from Xcode 26, first fetch that part with
+`xcodebuild -downloadComponent MetalToolchain`, and if `xcrun` can't find `metal`, point the
+tools at Xcode with `sudo xcode-select -s /Applications/Xcode.app`. Deleting the app leaves
+your notes alone.
+
 <div align="right"><a href="#readme-top">↑ back to top</a></div>
 
 ---
@@ -110,6 +125,8 @@ line again. `sudo pacman -R brouyon` removes it and leaves your notes alone.
 | `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | Text size |
 | `F1` or `Ctrl+/` | Show the shortcuts |
 
+On macOS, ⌘ takes the place of Ctrl, and ⌥ the place of Alt.
+
 </details>
 
 [DOC.md](DOC.md) explains how finding, lists and copying work, how your files are named, the
@@ -125,6 +142,9 @@ Brouyon uses your Omarchy theme, monospace font, text size, window transparency 
 and follows changes to any of them while it's open. Under Omarchy's Glassy setting, its
 background goes see-through like a terminal's while the text stays solid. If you'd rather
 keep fixed colours, Settings also has a Light and a Dark theme.
+
+It runs on macOS too, where it follows the system between light and dark instead.
+[DOC.md](DOC.md#on-macos) says what else changes there.
 
 <div align="right"><a href="#readme-top">↑ back to top</a></div>
 

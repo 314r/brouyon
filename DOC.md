@@ -2,7 +2,7 @@
 
 The [README](README.md) covers what Brouyon is and how to install it. This page has the rest:
 every shortcut, how finding, lists, copying and the word count work, where your notes live,
-the settings file, and how to work on the code.
+the settings file, what changes on macOS, and how to work on the code.
 
 ![Brouyon showing a note in Markdown, with a heading, a task list, a quote and inline code, and the list of notes on its left](screenshots/markdown-note.png)
 
@@ -23,6 +23,8 @@ the settings file, and how to work on the code.
 | `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | Text size |
 | `F1` or `Ctrl+/` | Show these shortcuts |
 | `Ctrl+Q` | Quit |
+
+On macOS, ⌘ takes the place of Ctrl, and ⌥ the place of Alt.
 
 ## Finding a note
 
@@ -111,6 +113,22 @@ notes_dir = "~/Notes"
 copy_as = "markdown"
 ```
 
+## On macOS
+
+Brouyon runs on a Mac too, installed from source as the README says. It works the same, with
+what a Mac expects of an app:
+
+- ⌘ takes the place of Ctrl in every shortcut, and ⌥ the place of Alt. The menu bar lists
+  them, along with ⌘H to hide Brouyon, ⌘M to minimise it and ⌘W to close it.
+- Closing the window quits Brouyon, after saving the note, as on Linux.
+- The window's buttons sit at the top left, over the list. The empty part of the header, and
+  the edge above the note, move the window, and a double click zooms it.
+- The theme called Omarchy is called System, and follows macOS between light and dark. In
+  `config.toml` it is still `omarchy`. Nothing else follows the desktop: the window is solid,
+  its corners square, and its font Menlo.
+- Notes and settings are in the same places: `~/.local/share/brouyon/` and
+  `~/.config/brouyon/config.toml`.
+
 ## Development
 
 ```sh
@@ -135,4 +153,9 @@ BROUYON_SCREENSHOTS=/tmp/brouyon-shots cargo test screenshots -- --ignored
 ```
 
 This also checks that the see-through parts really are, and writes `readme.png`, the
-picture at the top of this page (`screenshots/markdown-note.png`).
+picture at the top of this page (`screenshots/markdown-note.png`). Those checks were written
+against Linux's renderer.
+
+Code for macOS is only compiled on a Mac. The workflow in `.github/workflows/macos.yml`
+builds and tests it on every push. `tools/macos-icon` rewrites `macos/brouyon.icns`, the
+app's icon there, from `macos/brouyon.svg`, and needs `rsvg-convert`.

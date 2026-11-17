@@ -8,6 +8,8 @@ use crate::{
         ThemeMode,
     },
     desktop::{self, Desktop},
+    shortcuts::primary,
+    title_bar::{self, BAR_HEIGHT, TitleBar},
 };
 use gpui_kit::{
     App, AppContext, Bounds, Context, Div, Entity, FocusHandle, FontWeight, IntoElement,
@@ -37,10 +39,32 @@ pub fn bind_keys(cx: &mut App) {
     let context = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("escape", Cancel, context),
-        KeyBinding::new("ctrl-w", CloseSettings, context),
-        KeyBinding::new("ctrl-q", Quit, context),
+        KeyBinding::new(primary!("w"), CloseSettings, context),
+        KeyBinding::new(primary!("q"), Quit, context),
     ]);
 }
+
+/// The theme that follows the desktop's. A Mac has no Omarchy, so there it follows
+/// the system's light or dark appearance.
+#[cfg(not(target_os = "macos"))]
+const DESKTOP_THEME: &str = "Omarchy";
+#[cfg(target_os = "macos")]
+const DESKTOP_THEME: &str = "System";
+
+#[cfg(not(target_os = "macos"))]
+const THEME_HELP: &str = "Omarchy follows the current desktop theme and its changes. Light and \
+     Dark only set the colours: window transparency, the corners, the font and the text size \
+     still follow the desktop.";
+#[cfg(target_os = "macos")]
+const THEME_HELP: &str = "System follows macOS between light and dark as it changes. Light and \
+     Dark stay put.";
+
+#[cfg(not(target_os = "macos"))]
+const TEXT_SIZE_HELP: &str = "Scales the desktop's text size throughout Brouyon. In the main \
+     window, Ctrl+Plus, Ctrl+Minus and Ctrl+0 do the same.";
+#[cfg(target_os = "macos")]
+const TEXT_SIZE_HELP: &str = "Scales the text throughout Brouyon. In the main window, ⌘+, ⌘− \
+     and ⌘0 do the same.";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -76,9 +100,15 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
         // be the main one, so this window has an id of its own.
         app_id: Some("brouyon-settings".into()),
         // On Wayland this gives the window the focused one as its parent, and
-        // Hyprland floats a window that has a parent.
-        kind: WindowKind::Floating,
-        titlebar: None,
+        // Hyprland floats a window that has a parent. On macOS it would make a
+        // panel that floats over every other window.
+        kind: if title_bar::DRAWN {
+            WindowKind::Normal
+        } else {
+            WindowKind::Floating
+        },
+        titlebar: title_bar::options(),
+        app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
         // Set from the start, so the first frame isn't a solid one.
         window_background: desktop.transparency.surface(),
@@ -127,6 +157,7 @@ pub struct SettingsWindow {
     idle_choice: Entity<ChoiceState>,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    title_bar: TitleBar,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -176,6 +207,7 @@ impl SettingsWindow {
             idle_choice,
             focus,
             scroll: ScrollHandle::new(),
+            title_bar: TitleBar::default(),
         }
     }
 
@@ -223,7 +255,7 @@ impl SettingsWindow {
         .detach();
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = cx.omarchy();
         let (divider, fill) = (t.divider(), t.normal_fill());
         let rows = Section::ALL.map(|section| {
@@ -255,52 +287,62 @@ impl SettingsWindow {
             .bg(fill)
             .border_r_1()
             .border_color(divider)
-            .child(
+            .child(top_bar(
                 heading("Settings", cx)
                     .flex()
                     .flex_shrink_0()
                     .items_center()
-                    .h(rems(2.75))
-                    .px(rems(0.75)),
-            )
+                    .h(rems(BAR_HEIGHT))
+                    .px(rems(0.75))
+                    // On macOS the window's buttons sit at its left.
+                    .when_some(self.title_bar.buttons_width(window), |heading, buttons| {
+                        heading.pl(buttons)
+                    }),
+                &self.title_bar,
+            ))
             .child(div().flex().flex_col().px(rems(0.125)).children(rows))
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let divider = cx.omarchy().divider();
-        div()
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .justify_between()
-            .h(rems(2.75))
-            .pl(rems(1.25))
-            .pr(rems(0.125))
-            .border_b_1()
-            .border_color(divider)
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .child(self.section.title()),
-            )
-            .child(
-                button("close-settings", "", ButtonVariant::Secondary, cx)
-                    .accessibility_label("Close settings")
-                    .debug_selector(|| "close-settings".into())
-                    .child(icon(IconName::Close))
-                    .on_click(|_, window, _| window.remove_window()),
-            )
+        // On macOS the window's own buttons close it.
+        let close = (!title_bar::DRAWN).then(|| {
+            button("close-settings", "", ButtonVariant::Secondary, cx)
+                .accessibility_label("Close settings")
+                .debug_selector(|| "close-settings".into())
+                .child(icon(IconName::Close))
+                .on_click(|_, window, _| window.remove_window())
+        });
+        top_bar(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_between()
+                .h(rems(BAR_HEIGHT))
+                .pl(rems(1.25))
+                .pr(rems(0.125))
+                .border_b_1()
+                .border_color(divider)
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .child(self.section.title()),
+                )
+                .children(close),
+            &self.title_bar,
+        )
     }
 
     fn appearance_page(&self, config: &Config, cx: &mut Context<Self>) -> Div {
         let themes = [
-            (ThemeMode::Omarchy, "Omarchy"),
-            (ThemeMode::Light, "Light"),
-            (ThemeMode::Dark, "Dark"),
+            (ThemeMode::Omarchy, "Omarchy", DESKTOP_THEME),
+            (ThemeMode::Light, "Light", "Light"),
+            (ThemeMode::Dark, "Dark", "Dark"),
         ]
-        .map(|(mode, label)| {
-            button(label, label, ButtonVariant::Outline, cx)
-                .debug_selector(move || format!("theme-{label}"))
+        .map(|(mode, id, label)| {
+            button(id, label, ButtonVariant::Outline, cx)
+                .debug_selector(move || format!("theme-{id}"))
                 .selected(config.theme == mode)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.app.update(cx, |app, cx| app.set_theme(mode, cx));
@@ -338,21 +380,12 @@ impl SettingsWindow {
             .child(
                 section("Theme", cx)
                     .child(row().children(themes))
-                    .child(description(
-                        "Omarchy follows the current desktop theme and its changes. Light and \
-                         Dark only set the colours: window transparency, the corners, the font \
-                         and the text size still follow the desktop.",
-                        cx,
-                    )),
+                    .child(description(THEME_HELP, cx)),
             )
             .child(
                 section("Text size", cx)
                     .child(row().child(smaller).child(reset).child(larger))
-                    .child(description(
-                        "Scales the desktop's text size throughout Brouyon. In the main window, \
-                         Ctrl+Plus, Ctrl+Minus and Ctrl+0 do the same.",
-                        cx,
-                    )),
+                    .child(description(TEXT_SIZE_HELP, cx)),
             )
     }
 
@@ -469,6 +502,8 @@ impl Render for SettingsWindow {
         let config = brouyon.config().clone();
         let problem = brouyon.settings_problem.clone();
         window.set_rem_size(px(config.rem_px(cx.global::<Desktop>().text_scale)));
+        self.title_bar
+            .place_buttons(rems(BAR_HEIGHT).to_pixels(window.rem_size()), window);
         let t = cx.omarchy().clone();
 
         let content = match self.section {
@@ -476,7 +511,7 @@ impl Render for SettingsWindow {
             Section::Notes => self.notes_page(&config, window, cx),
             Section::About => self.about_page(cx),
         };
-        let sidebar = self.sidebar(cx);
+        let sidebar = self.sidebar(window, cx);
         let header = self.header(cx);
         let scrollbar = scrollbar(
             "settings-scrollbar",
@@ -548,6 +583,16 @@ impl Render for SettingsWindow {
     }
 }
 
+/// A bar along the window's top, which moves the window on macOS. Only for bars
+/// whose controls take no clicks: pressing one would start a move too.
+fn top_bar(bar: Div, title_bar: &TitleBar) -> Div {
+    if title_bar::DRAWN {
+        title_bar.drags(bar)
+    } else {
+        bar
+    }
+}
+
 fn page() -> Div {
     div()
         .flex()
@@ -612,7 +657,7 @@ impl SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{draw, keys, open, open_with, type_and_save};
+    use crate::app::tests::{draw, keys, on_this_system, open, open_with, type_and_save};
     use crate::config::Config;
     use crate::desktop::Transparency;
     use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
@@ -648,7 +693,7 @@ mod tests {
     }
 
     fn closing_keys(keystrokes: &str, cx: &mut VisualTestContext) {
-        cx.simulate_keystrokes(keystrokes);
+        cx.simulate_keystrokes(&on_this_system(keystrokes));
         cx.run_until_parked();
     }
 
@@ -726,7 +771,12 @@ mod tests {
     fn it_opens_again_after_being_closed(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (first, mut settings_cx) = open_settings(&view, cx);
-        closing_click("close-settings", &mut settings_cx);
+        // On macOS the window's own button closes it, which the tests can't press.
+        if title_bar::DRAWN {
+            closing_keys("escape", &mut settings_cx);
+        } else {
+            closing_click("close-settings", &mut settings_cx);
+        }
         assert!(!is_open(first, cx));
 
         let (second, _settings_cx) = open_settings(&view, cx);

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Write macos/brouyon.icns, the app's icon on macOS, from macos/brouyon.svg.
+
+Apple's iconutil only runs on a Mac, so this packs the file itself, on any system with
+rsvg-convert: an ICNS file is a list of PNGs, each tagged with the size it's drawn for.
+Run it after changing the SVG.
+"""
+
+import struct
+import subprocess
+import tempfile
+from pathlib import Path
+
+# The tag and size of each image, as iconutil writes them from a full icon set: 16 to
+# 512 points, each also twice as large for Retina screens.
+IMAGES = [
+    ("icp4", 16), ("ic11", 32), ("icp5", 32), ("ic12", 64), ("ic07", 128),
+    ("ic13", 256), ("ic08", 256), ("ic14", 512), ("ic09", 512), ("ic10", 1024),
+]
+
+
+def main():
+    root = Path(__file__).resolve().parent.parent
+    svg = root / "macos/brouyon.svg"
+    drawn = {}
+    with tempfile.TemporaryDirectory() as folder:
+        for _, size in IMAGES:
+            if size not in drawn:
+                png = Path(folder) / f"{size}.png"
+                subprocess.run(["rsvg-convert", "--width", str(size), "--height", str(size),
+                                "--output", str(png), str(svg)], check=True)
+                drawn[size] = png.read_bytes()
+    body = b"".join(tag.encode("ascii") + struct.pack(">I", 8 + len(drawn[size])) + drawn[size]
+                    for tag, size in IMAGES)
+    (root / "macos/brouyon.icns").write_bytes(b"icns" + struct.pack(">I", 8 + len(body)) + body)
+
+
+if __name__ == "__main__":
+    main()

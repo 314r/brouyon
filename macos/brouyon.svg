@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- pkgbuild/brouyon.svg on the grid macOS gives app icons: a rounded square, inset
+       from the canvas's edges. tools/macos-icon turns it into brouyon.icns. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#1b2124"/>
+  <g transform="translate(100 100) scale(6.4375)">
+    <rect x="24" y="30" width="48" height="10" fill="#e39b12"/>
+    <rect x="24" y="56" width="80" height="6" fill="#e7e1d6"/>
+    <rect x="24" y="74" width="62" height="6" fill="#e7e1d6"/>
+    <rect x="94" y="68" width="6" height="30" fill="#e39b12"/>
+  </g>
+</svg>

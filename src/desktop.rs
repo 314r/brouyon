@@ -1,6 +1,10 @@
 //! What Brouyon follows from the desktop besides the palette and the corners, which
 //! gpui-omarchy already follows: Omarchy's window transparency, the text size and the
 //! monospace font. All of it applies live, and Brouyon only ever reads it.
+//!
+//! A Mac has no Omarchy to follow, so there only the solid, unscaled default is used,
+//! and the rest only by the tests.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use crate::config::{home_dir, xdg_dir};
 use gpui_kit::{App, Global, Hsla, SharedString, Window, WindowBackgroundAppearance};

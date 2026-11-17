@@ -6,9 +6,13 @@ mod assets;
 mod config;
 mod desktop;
 mod lists;
+#[cfg(target_os = "macos")]
+mod macos;
 mod markdown;
 mod settings;
+mod shortcuts;
 mod store;
+mod title_bar;
 
 use app::Brouyon;
 use config::Config;
@@ -44,9 +48,10 @@ fn startup_problem(problems: impl IntoIterator<Item = Option<String>>) -> Option
 fn window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         app_id: Some("brouyon".into()),
-        // Hyprland draws the border and handles tiling, so there is no
-        // title bar of our own.
-        titlebar: None,
+        // Hyprland draws the border and handles tiling, so on Linux there is no
+        // title bar. On macOS the window's buttons sit over the top of the list.
+        titlebar: title_bar::options(),
+        app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
         // Set from the start, so the first frame isn't a solid one.
         window_background: cx.global::<Desktop>().transparency.surface(),
@@ -75,17 +80,24 @@ fn main() {
         .run(move |cx| {
             gpui_omarchy::init(cx);
             app::init(cx);
+            #[cfg(target_os = "macos")]
+            macos::init(cx);
+            // What it follows is Omarchy's, which a Mac doesn't have.
+            #[cfg(not(target_os = "macos"))]
             desktop::follow(cx);
             app::apply_theme(config.theme, cx);
             let options = window_options(cx);
             cx.open_window(options, |window, cx| {
                 window.set_window_title("Brouyon");
-                cx.new(|cx| {
+                let brouyon = cx.new(|cx| {
                     let mut brouyon = Brouyon::new(store, config, window, cx);
                     brouyon.settings_problem =
                         startup_problem([config_problem, folder_problem]).map(Into::into);
                     brouyon
-                })
+                });
+                #[cfg(target_os = "macos")]
+                macos::follow_appearance(&brouyon, window);
+                brouyon
             })
             .expect("open window");
             cx.activate(true);

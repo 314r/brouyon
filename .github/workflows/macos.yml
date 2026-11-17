@@ -1,0 +1,18 @@
+# Builds and tests Brouyon on macOS, whose code Linux never compiles.
+name: macOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # GPUI compiles its shaders with it. From Xcode 26 it is a separate download.
+      - name: Metal compiler
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      # The Rust that mise.toml pins.
+      - uses: jdx/mise-action@v2
+      - run: cargo test --locked
