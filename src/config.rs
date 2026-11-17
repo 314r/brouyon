@@ -43,6 +43,36 @@ impl ThemeMode {
     }
 }
 
+/// What the copy button puts on the clipboard.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CopyFormat {
+    /// The note as it is written.
+    #[default]
+    Markdown,
+    /// The note without the Markdown that styles it.
+    Text,
+}
+
+impl CopyFormat {
+    pub const ALL: [Self; 2] = [Self::Markdown, Self::Text];
+
+    fn key(self) -> &'static str {
+        match self {
+            CopyFormat::Markdown => "markdown",
+            CopyFormat::Text => "text",
+        }
+    }
+
+    /// As it reads after "Copy as" and "Copied as".
+    pub fn label(self) -> &'static str {
+        match self {
+            CopyFormat::Markdown => "Markdown",
+            CopyFormat::Text => "text",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// The file these settings are saved to.
@@ -54,6 +84,8 @@ pub struct Config {
     pub theme: ThemeMode,
     /// Scales the desktop's text size throughout the app.
     pub text_percent: u32,
+    /// The format last chosen for copying a note, which the button uses again.
+    pub copy_as: CopyFormat,
 }
 
 #[derive(Default, Deserialize)]
@@ -63,6 +95,7 @@ struct FileConfig {
     notes_dir: Option<String>,
     theme: Option<ThemeMode>,
     text_percent: Option<u32>,
+    copy_as: Option<CopyFormat>,
 }
 
 impl Config {
@@ -106,6 +139,7 @@ impl Config {
             text_percent: normalized_text_percent(
                 file.text_percent.unwrap_or(DEFAULT_TEXT_PERCENT),
             ),
+            copy_as: file.copy_as.unwrap_or_default(),
         }
     }
 
@@ -120,6 +154,7 @@ impl Config {
             idle: Some(Duration::from_secs(300)),
             theme: ThemeMode::default(),
             text_percent: DEFAULT_TEXT_PERCENT,
+            copy_as: CopyFormat::default(),
         }
     }
 
@@ -143,6 +178,11 @@ impl Config {
     pub fn set_text_percent(&mut self, percent: u32) -> io::Result<()> {
         self.text_percent = normalized_text_percent(percent);
         self.save("text_percent", Some(i64::from(self.text_percent).into()))
+    }
+
+    pub fn set_copy_as(&mut self, format: CopyFormat) -> io::Result<()> {
+        self.copy_as = format;
+        self.save("copy_as", Some(format.key().into()))
     }
 
     pub fn set_idle(&mut self, idle: Option<Duration>) -> io::Result<()> {
@@ -304,6 +344,7 @@ mod tests {
         assert_eq!(config.idle, Some(Duration::from_secs(300)));
         assert_eq!(config.theme, ThemeMode::Omarchy);
         assert_eq!(config.text_percent, 100);
+        assert_eq!(config.copy_as, CopyFormat::Markdown);
     }
 
     #[test]
@@ -371,6 +412,7 @@ mod tests {
         assert!(toml::from_str::<FileConfig>("idle_minutes = \"soon\"").is_err());
         assert!(toml::from_str::<FileConfig>("unknown_key = 1").is_err());
         assert!(toml::from_str::<FileConfig>("theme = \"blue\"").is_err());
+        assert!(toml::from_str::<FileConfig>("copy_as = \"html\"").is_err());
     }
 
     #[test]
@@ -425,7 +467,9 @@ mod tests {
         config.set_text_percent(120).unwrap();
         config.set_idle(Some(Duration::from_secs(600))).unwrap();
         config.set_notes_dir(Some("/srv/notes".into())).unwrap();
+        config.set_copy_as(CopyFormat::Text).unwrap();
         assert_eq!(reloaded(&config), config);
+        assert_eq!(config.copy_as, CopyFormat::Text);
         assert_eq!(config.theme, ThemeMode::Light);
         assert_eq!(config.text_percent, 120);
         assert_eq!(config.idle, Some(Duration::from_secs(600)));

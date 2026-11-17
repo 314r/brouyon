@@ -2,7 +2,7 @@
 //! on to a blank note, and how all of that is drawn.
 
 use crate::{
-    config::{Config, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
+    config::{Config, CopyFormat, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
     desktop::{self, Desktop},
     lists, markdown,
     settings::{self, SettingsWindow},
@@ -14,13 +14,14 @@ use gpui_kit::base::{
     input::{Editor, EditorState, InputEvent, InputState, Redo},
 };
 use gpui_kit::{
-    App, Context, DispatchPhase, Entity, Focusable, FontWeight, IntoElement, MouseButton, Render,
-    ScrollEvent, ScrollStrategy, SharedString, Styled, Subscription, Task, Window, WindowHandle,
-    canvas, div, prelude::*, px, relative, rems, size, transparent_black,
+    Anchor, App, ClipboardItem, Context, DispatchPhase, Entity, Focusable, FontWeight, IntoElement,
+    MouseButton, Render, ScrollEvent, ScrollStrategy, SharedString, Styled, Subscription, Task,
+    Window, WindowHandle, canvas, div, prelude::*, px, relative, rems, size, transparent_black,
 };
 use gpui_omarchy::{
-    ActiveTheme, ButtonVariant, IconName, Theme, alert_dialog, button, dialog, dialog_button,
-    dialog_description, dialog_popup, dialog_title, icon, input, virtual_list, with_tooltip,
+    ActiveTheme, ButtonVariant, IconName, MenuItem, Theme, alert_dialog, button, dialog,
+    dialog_button, dialog_description, dialog_popup, dialog_title, icon, input, menu, virtual_list,
+    with_tooltip,
 };
 use std::{
     io,
@@ -31,13 +32,16 @@ use std::{
 
 /// Saving waits for this pause in typing, so a burst of keys is one write.
 const SAVE_DELAY: Duration = Duration::from_millis(400);
+/// How long the strip under the note says that it was copied.
+const COPIED_NOTICE: Duration = Duration::from_secs(2);
 const KEY_CONTEXT: &str = "Brouyon";
 /// What the shortcuts overlay lists, in the order of the README's table.
-const SHORTCUTS: [(&str, &str); 12] = [
+const SHORTCUTS: [(&str, &str); 13] = [
     ("Ctrl+N", "New note"),
     ("Ctrl+F", "Find a note"),
     ("Alt+↑ / Alt+↓", "Previous / next note"),
     ("Ctrl+Enter", "Tick a task"),
+    ("Ctrl+Shift+C", "Copy the note"),
     ("Ctrl+Shift+Backspace", "Move to Trash"),
     ("Ctrl+Shift+T", "Switch between Notes and Trash"),
     ("Esc", "Stop finding, or leave the Trash"),
@@ -56,6 +60,7 @@ gpui_kit::actions!(
         PreviousNote,
         NextNote,
         ToggleTask,
+        CopyNote,
         MoveToTrash,
         ToggleTrash,
         GoBack,
@@ -81,6 +86,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-f", FindNote, context),
         KeyBinding::new("alt-up", PreviousNote, context),
         KeyBinding::new("alt-down", NextNote, context),
+        KeyBinding::new("ctrl-shift-c", CopyNote, context),
         KeyBinding::new("ctrl-shift-backspace", MoveToTrash, context),
         KeyBinding::new("ctrl-shift-t", ToggleTrash, context),
         KeyBinding::new("escape", GoBack, context),
@@ -203,6 +209,11 @@ pub struct Brouyon {
     settings_window: Option<WindowHandle<SettingsWindow>>,
     save_task: Option<Task<()>>,
     idle_task: Option<Task<()>>,
+    /// How the open note was just copied, for the strip to say so.
+    copied: Option<CopyFormat>,
+    copied_task: Option<Task<()>>,
+    /// The menu of formats beside the copy button is showing.
+    copy_menu_open: bool,
     confirm: Option<Confirm>,
     shortcuts_open: bool,
     /// Held by whichever dialog is open.
@@ -252,6 +263,9 @@ impl Brouyon {
             settings_window: None,
             save_task: None,
             idle_task: None,
+            copied: None,
+            copied_task: None,
+            copy_menu_open: false,
             confirm: None,
             shortcuts_open: false,
             dialog_focus: cx.focus_handle(),
@@ -511,6 +525,9 @@ impl Brouyon {
         }
         self.selection = selection;
         self.loaded_modified = modified;
+        self.copied = None;
+        self.copied_task = None;
+        self.copy_menu_open = false;
         self.replace_editor(&text, readonly, window, cx);
         self.reveal_selection();
         self.restart_idle_timer(window, cx);
@@ -741,8 +758,35 @@ impl Brouyon {
         }
     }
 
+    /// Puts the open note on the clipboard as it stands, saved or not, and keeps
+    /// `format` for the button's next click. A note with nothing in it is left out,
+    /// so it can't replace what the clipboard holds.
+    fn copy_note(&mut self, format: CopyFormat, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value();
+        if text.trim().is_empty() {
+            return;
+        }
+        let text = match format {
+            CopyFormat::Markdown => text.to_string(),
+            CopyFormat::Text => markdown::plain_text(&text),
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.set_copy_as(format, cx);
+        self.copied = Some(format);
+        self.copied_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_NOTICE).await;
+            this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     fn ask(&mut self, confirm: Confirm, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = Some(confirm);
+        self.copy_menu_open = false;
         self.dialog_focus.focus(window, cx);
         cx.notify();
     }
@@ -754,6 +798,7 @@ impl Brouyon {
     fn toggle_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shortcuts_open = !self.shortcuts_open;
         if self.shortcuts_open {
+            self.copy_menu_open = false;
             self.dialog_focus.focus(window, cx);
         } else {
             self.focus_content(window, cx);
@@ -827,6 +872,13 @@ impl Brouyon {
         }
     }
 
+    fn set_copy_as(&mut self, format: CopyFormat, cx: &mut Context<Self>) {
+        if format != self.config.copy_as {
+            let saved = self.config.set_copy_as(format);
+            self.report_setting(saved, cx);
+        }
+    }
+
     pub fn set_text_percent(&mut self, percent: u32, cx: &mut Context<Self>) {
         let saved = self.config.set_text_percent(percent);
         self.report_setting(saved, cx);
@@ -889,7 +941,7 @@ impl Brouyon {
         let t = cx.omarchy().clone();
         let in_trash = self.selection.in_trash();
         // Wide enough for a title and its date on one line, unless the editor needs it.
-        let narrow = window.viewport_size().width < rems(45.).to_pixels(window.rem_size());
+        let narrow = is_narrow(window);
         let width = if narrow { 11.25 } else { 20. };
         let tabs = Tabs::new("note-tabs")
             .flex()
@@ -1100,7 +1152,7 @@ impl Brouyon {
             )
     }
 
-    fn editor_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn editor_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let editor = self.editor.clone();
         div()
             .flex()
@@ -1121,19 +1173,24 @@ impl Brouyon {
                     })
                     .child(div().size_full().child(Editor::new(&self.editor))),
             )
-            .child(self.status_strip(cx))
+            .child(self.status_strip(window, cx))
     }
 
-    fn status_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn status_strip(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = cx.omarchy().clone();
         let problem = self.problem.as_ref().or(self.settings_problem.as_ref());
-        let status = match (problem, &self.selection, self.loaded_modified) {
-            (Some(problem), _, _) => div().text_color(t.danger).child(problem.clone()),
-            (None, Selection::Note(_), Some(modified)) => div().child(format!(
+        let status = match (problem, self.copied, &self.selection, self.loaded_modified) {
+            (Some(problem), ..) => div().text_color(t.danger).child(problem.clone()),
+            (None, Some(format), ..) => div().child(format!("Copied as {}", format.label())),
+            (None, None, Selection::Note(_), Some(modified)) => div().child(format!(
                 "Saved · {}",
                 format_date(modified, chrono::Local::now())
             )),
-            (None, Selection::Trashed(_), _) => div().child("In the Trash"),
+            (None, None, Selection::Trashed(_), _) => div().child("In the Trash"),
             _ => div(),
         };
         let actions = div().flex().flex_shrink_0().gap(rems(0.25));
@@ -1173,6 +1230,11 @@ impl Brouyon {
             }
             _ => actions,
         };
+        // A narrow window has no room for them beside the rest. The key still works.
+        let copy = (self.selection != Selection::Blank && !is_narrow(window))
+            .then(|| self.copy_buttons(cx));
+        // Gone with its button, so that it doesn't come back open.
+        self.copy_menu_open &= copy.is_some();
         let settings = with_tooltip(
             button("settings", "", ButtonVariant::Secondary, cx)
                 .accessibility_label("Settings")
@@ -1195,7 +1257,70 @@ impl Brouyon {
             .text_size(rems(0.6875))
             .text_color(t.secondary)
             .child(div().truncate().child(status))
-            .child(actions.child(settings))
+            .child(actions.children(copy).child(settings))
+    }
+
+    /// The button that copies the note in the format last chosen, and beside it
+    /// the menu that copies it in either one.
+    fn copy_buttons(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let format = self.config.copy_as;
+        let pressed = cx.omarchy().pressed_fill();
+        let label = format!("Copy as {}", format.label());
+        let copy = with_tooltip(
+            button("copy-note", "", ButtonVariant::Secondary, cx)
+                .accessibility_label(label.clone())
+                .debug_selector(|| "copy-note".into())
+                .child(icon(if self.copied.is_some() {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.copy_note(format, cx);
+                    this.focus_content(window, cx);
+                })),
+            format!("{label} (Ctrl+Shift+C)"),
+        );
+        let trigger = button("copy-as", "", ButtonVariant::Secondary, cx)
+            .accessibility_label("Choose what to copy")
+            .debug_selector(|| "copy-as".into())
+            .px(rems(0.125))
+            .styles(move |styles| styles.selected(move |style| style.bg(pressed)))
+            .child(icon(IconName::ChevronUp).size(rems(0.875)));
+        // Its tooltip would come up over the open menu.
+        let trigger = if self.copy_menu_open {
+            trigger
+        } else {
+            with_tooltip(trigger, "Copy as…")
+        };
+        let (chosen, changed) = (cx.entity(), cx.entity());
+        let formats = menu(
+            "copy-formats",
+            trigger,
+            CopyFormat::ALL
+                .map(|option| {
+                    MenuItem::new(format!("Copy as {}", option.label())).checked(option == format)
+                })
+                .to_vec(),
+            move |index, _, cx| {
+                chosen.update(cx, |this, cx| this.copy_note(CopyFormat::ALL[index], cx));
+            },
+        )
+        // The strip is at the bottom of the window, so the menu opens above it.
+        .anchor(Anchor::BottomRight)
+        // Kept here so that whatever takes the keyboard elsewhere can close the menu.
+        .open(self.copy_menu_open)
+        .on_open_change(move |open, window, cx| {
+            changed.update(cx, |this, cx| {
+                this.copy_menu_open = *open;
+                // However it closes, typing carries on in the note.
+                if !*open {
+                    this.focus_content(window, cx);
+                }
+                cx.notify();
+            });
+        });
+        div().flex().items_center().child(copy).child(formats)
     }
 
     fn confirm_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -1324,7 +1449,7 @@ impl Render for Brouyon {
         self.editor
             .update(cx, |state, _| state.set_editor_style(style));
         let sidebar = self.sidebar(window, cx);
-        let editor_pane = self.editor_pane(cx);
+        let editor_pane = self.editor_pane(window, cx);
         let dialog = self.confirm_dialog(cx);
         let shortcuts = self.shortcuts_dialog(window, cx);
         let view = cx.entity().downgrade();
@@ -1373,6 +1498,9 @@ impl Render for Brouyon {
                     } else {
                         cx.propagate();
                     }
+                }))
+                .on_action(cx.listener(|this, _: &CopyNote, _, cx| {
+                    this.copy_note(this.config.copy_as, cx);
                 }))
                 .on_action(cx.listener(|this, _: &MoveToTrash, window, cx| {
                     this.move_to_trash(window, cx);
@@ -1426,6 +1554,12 @@ impl Render for Brouyon {
             .children(dialog)
             .children(shortcuts)
     }
+}
+
+/// Too narrow for everything, so the list is thinner and the buttons with a key
+/// to do the same are left out.
+fn is_narrow(window: &Window) -> bool {
+    window.viewport_size().width < rems(45.).to_pixels(window.rem_size())
 }
 
 /// A tab above the list: a small capital label with its count after it, and a
@@ -2643,6 +2777,176 @@ pub(crate) mod tests {
         assert!(!filter_is_open(&view, cx));
     }
 
+    const MARKED_UP: &str = "# Title\n\nSome **bold** words\n";
+    const NOT_MARKED_UP: &str = "Title\n\nSome bold words\n";
+
+    /// Opens on a note written in Markdown.
+    fn open_marked_up(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<Brouyon>, &mut VisualTestContext) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), MARKED_UP).unwrap();
+        let (dir, view, cx) = open_with(cx, dir);
+        keys(cx, "alt-down");
+        (dir, view, cx)
+    }
+
+    fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    fn copy_format(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> CopyFormat {
+        cx.update(|_, cx| view.read(cx).config.copy_as)
+    }
+
+    #[gpui_kit::test]
+    fn the_copy_button_copies_the_note_as_it_is_written(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        click("copy-note", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(MARKED_UP));
+        assert!(editor_is_focused(&view, cx), "typing carries on");
+    }
+
+    #[gpui_kit::test]
+    fn the_menu_copies_as_text_and_the_button_does_the_same_from_then_on(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        click("copy-as", cx);
+        click("omarchy-menu-item-1", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(NOT_MARKED_UP));
+        assert!(cx.debug_bounds("omarchy-menu-content").is_none());
+        assert!(editor_is_focused(&view, cx), "typing carries on");
+        assert_eq!(copy_format(&view, cx), CopyFormat::Text);
+        cx.update(|_, cx| {
+            let saved = view.read(cx).config.saved_text();
+            assert!(saved.contains("copy_as = \"text\""), "{saved}");
+        });
+
+        cx.write_to_clipboard(ClipboardItem::new_string("something else".into()));
+        click("copy-note", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(NOT_MARKED_UP));
+
+        click("copy-as", cx);
+        click("omarchy-menu-item-0", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(MARKED_UP));
+        assert_eq!(copy_format(&view, cx), CopyFormat::Markdown);
+    }
+
+    #[gpui_kit::test]
+    fn the_key_copies_text_typed_moments_ago(cx: &mut TestAppContext) {
+        let (dir, _view, cx) = open(cx);
+        cx.simulate_input("*not* saved yet");
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("*not* saved yet"));
+        assert!(note_texts(dir.path()).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn a_blank_note_has_nothing_to_copy(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("kept".into()));
+        assert!(cx.debug_bounds("copy-note").is_none());
+        cx.simulate_input("  ");
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some("kept"));
+        cx.update(|_, cx| assert_eq!(view.read(cx).copied, None));
+    }
+
+    #[gpui_kit::test]
+    fn a_narrow_window_drops_the_copy_buttons_and_keeps_the_key(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open_marked_up(cx);
+        cx.simulate_resize(size(px(500.), px(420.)));
+        draw(cx);
+        assert!(cx.debug_bounds("copy-note").is_none());
+        assert!(cx.debug_bounds("copy-as").is_none());
+        assert!(cx.debug_bounds("settings").is_some());
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some(MARKED_UP));
+    }
+
+    #[gpui_kit::test]
+    fn a_trashed_note_can_be_copied_and_escape_closes_the_menu_first(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        keys(cx, "ctrl-shift-backspace");
+        keys(cx, "ctrl-shift-t");
+        assert!(selection(&view, cx).in_trash());
+
+        click("copy-as", cx);
+        assert!(cx.debug_bounds("omarchy-menu-content").is_some());
+        keys(cx, "escape");
+        assert!(cx.debug_bounds("omarchy-menu-content").is_none());
+        assert!(selection(&view, cx).in_trash(), "still in the Trash");
+        assert_eq!(clipboard(cx), None);
+        assert!(
+            editor_is_focused(&view, cx),
+            "the keyboard is back in the note"
+        );
+
+        click("copy-note", cx);
+        assert_eq!(clipboard(cx).as_deref(), Some(MARKED_UP));
+    }
+
+    #[gpui_kit::test]
+    fn the_menu_closes_when_the_keyboard_goes_elsewhere(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "first").unwrap();
+        fs::write(dir.path().join("b.md"), "second").unwrap();
+        let (_dir, view, cx) = open_with(cx, dir);
+        keys(cx, "alt-down");
+        let menu_is_open =
+            |cx: &mut VisualTestContext| cx.debug_bounds("omarchy-menu-content").is_some();
+
+        click("copy-as", cx);
+        assert!(menu_is_open(cx));
+        keys(cx, "alt-down");
+        assert!(!menu_is_open(cx), "another note");
+        assert!(editor_is_focused(&view, cx));
+
+        click("copy-as", cx);
+        keys(cx, "f1");
+        assert!(!menu_is_open(cx), "the shortcuts");
+        assert!(shortcuts_open(&view, cx));
+        keys(cx, "f1");
+
+        click("copy-as", cx);
+        click_editor(cx);
+        assert!(!menu_is_open(cx), "a click outside it");
+        assert!(editor_is_focused(&view, cx));
+        assert_eq!(clipboard(cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn the_strip_says_what_was_copied_for_a_moment(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        let copied = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).copied);
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(copied(cx), Some(CopyFormat::Markdown));
+        wait(cx, COPIED_NOTICE / 2);
+        keys(cx, "ctrl-shift-c");
+        wait(cx, COPIED_NOTICE / 2);
+        assert_eq!(
+            copied(cx),
+            Some(CopyFormat::Markdown),
+            "counted from the last copy"
+        );
+        wait(cx, COPIED_NOTICE / 2);
+        assert_eq!(copied(cx), None);
+
+        keys(cx, "ctrl-shift-c");
+        keys(cx, "ctrl-n");
+        assert_eq!(copied(cx), None, "another note wasn't copied");
+    }
+
+    #[gpui_kit::test]
+    fn copying_waits_for_an_open_question(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        view.update_in(cx, |this, window, cx| {
+            this.ask(Confirm::EmptyTrash, window, cx);
+        });
+        draw(cx);
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx), None);
+    }
+
     fn set_desktop(cx: &mut VisualTestContext, change: impl FnOnce(&mut Desktop)) {
         cx.update(|_, cx| change(cx.global_mut::<Desktop>()));
         cx.run_until_parked();
@@ -2908,6 +3212,27 @@ pub(crate) mod tests {
             .unwrap();
         capture(&mut cx, any_window, &out.join("02-note.png"));
 
+        window
+            .update(&mut cx, |this, _, cx| {
+                this.copy_menu_open = true;
+                cx.notify();
+            })
+            .unwrap();
+        capture(&mut cx, any_window, &out.join("02-copy-menu.png"));
+        window
+            .update(&mut cx, |this, _, cx| {
+                this.copy_menu_open = false;
+                this.copy_note(CopyFormat::Text, cx);
+            })
+            .unwrap();
+        capture(&mut cx, any_window, &out.join("02-copied.png"));
+        window
+            .update(&mut cx, |this, _, cx| {
+                this.copied = None;
+                this.set_copy_as(CopyFormat::Markdown, cx);
+            })
+            .unwrap();
+
         let look_for =
             |this: &mut Brouyon, words: &str, window: &mut Window, cx: &mut Context<Brouyon>| {
                 this.open_filter(window, cx);
@@ -3045,14 +3370,19 @@ pub(crate) mod tests {
             .unwrap();
         capture(&mut cx, narrow, &out.join("14-narrow-finding.png"));
         narrow_window
-            .update(&mut cx, |this, window, cx| {
-                this.close_filter();
-                this.focus_content(window, cx);
-                cx.notify();
-            })
+            .update(&mut cx, |this, window, cx| this.toggle_trash(window, cx))
             .unwrap();
+        capture(&mut cx, narrow, &out.join("14-narrow-trash.png"));
         narrow_window
             .update(&mut cx, |this, window, cx| {
+                this.show_notes(window, cx);
+                this.select(Selection::Note("2026-11-06 09-40-00.md".into()), window, cx);
+            })
+            .unwrap();
+        capture(&mut cx, narrow, &out.join("14-narrow-note.png"));
+        narrow_window
+            .update(&mut cx, |this, window, cx| {
+                this.select(Selection::Blank, window, cx);
                 this.toggle_shortcuts(window, cx);
             })
             .unwrap();

@@ -47,6 +47,8 @@ Leave it alone for 5 minutes and it puts you on a fresh blank note.
   task.
 - 🔍 **Find a note by the words in it.** `Ctrl+F` narrows the list as you type and shows the
   line each note matched on.
+- 📋 **Copy a note in one click.** As Markdown, or as plain text without the marks, ready to
+  paste anywhere.
 - 📄 **Plain files.** Every note is a `.md` file in `~/.local/share/brouyon/`. There is no
   database, and Brouyon picks up changes you make with other apps.
 
@@ -100,6 +102,7 @@ line again. `sudo pacman -R brouyon` removes it and leaves your notes alone.
 | `Ctrl+F` | Find a note |
 | `Alt+↑` / `Alt+↓` | Previous / next note |
 | `Ctrl+Enter` | Tick a task, or make the line one |
+| `Ctrl+Shift+C` | Copy the note |
 | `Ctrl+Shift+Backspace` | Move to Trash |
 | `Ctrl+Shift+T` | Switch between the Notes and Trash tabs |
 | `Esc` | Stop finding, leave the Trash, or close Settings |
@@ -109,8 +112,8 @@ line again. `sudo pacman -R brouyon` removes it and leaves your notes alone.
 
 </details>
 
-[DOC.md](DOC.md) explains how finding and lists work, how your files are named, the settings
-file, and how to work on the code.
+[DOC.md](DOC.md) explains how finding, lists and copying work, how your files are named, the
+settings file, and how to work on the code.
 
 <div align="right"><a href="#readme-top">↑ back to top</a></div>
 

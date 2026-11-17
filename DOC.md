@@ -1,8 +1,8 @@
 # Brouyon in detail
 
 The [README](README.md) covers what Brouyon is and how to install it. This page has the rest:
-every shortcut, how finding and lists work, where your notes live, the settings file, and
-how to work on the code.
+every shortcut, how finding, lists and copying work, where your notes live, the settings
+file, and how to work on the code.
 
 ![Brouyon showing a note in Markdown, with a heading, a task list, a quote and inline code, and the list of notes on its left](screenshots/markdown-note.png)
 
@@ -14,6 +14,7 @@ how to work on the code.
 | `Ctrl+F` | Find a note |
 | `Alt+↑` / `Alt+↓` | Previous / next note |
 | `Ctrl+Enter` | Tick a task, or make the line one |
+| `Ctrl+Shift+C` | Copy the note |
 | `Ctrl+Shift+Backspace` | Move to Trash |
 | `Ctrl+Shift+T` | Switch between the Notes and Trash tabs |
 | `Esc` | Stop finding, leave the Trash, or close Settings |
@@ -41,6 +42,21 @@ new line.
 
 `Ctrl+Enter` ticks the task the cursor is on, or unticks it. On a line that isn't a
 task, it makes it one. Code blocks are left as typed.
+
+## Copying a note
+
+The copy button under the note, or `Ctrl+Shift+C`, puts the whole note on the clipboard. The
+arrow beside the button opens a menu with two ways to copy it, and the button keeps to the
+one you chose last:
+
+- **Copy as Markdown** copies the note exactly as it is written.
+- **Copy as text** leaves out the Markdown that styles it: the `#` of a heading, the marks
+  around bold, italic, struck and code, and the fences of a code block. A link becomes its
+  text followed by its address in brackets. Lists, tasks, quotes and your line breaks stay
+  as you typed them.
+
+Notes in the Trash can be copied too. A narrow window has no room for the button, but the
+key still works.
 
 ## Your notes
 
@@ -83,6 +99,10 @@ idle_minutes = 5
 
 # Where notes are stored. Without this line, ~/.local/share/brouyon.
 notes_dir = "~/Notes"
+
+# What the copy button copies: markdown, or text for the note without its Markdown.
+# The menu beside the button sets this.
+copy_as = "markdown"
 ```
 
 ## Development
