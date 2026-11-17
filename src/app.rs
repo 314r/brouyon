@@ -1040,24 +1040,36 @@ impl Brouyon {
             list.into_any_element()
         };
 
-        let footer = in_trash.then(|| {
-            div()
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_end()
-                .h(rems(2.75))
-                .px(rems(0.5))
-                .border_t_1()
-                .border_color(t.divider())
-                .child(
-                    button("empty-trash", "Empty Trash", ButtonVariant::Outline, cx)
-                        .debug_selector(|| "empty-trash".into())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.ask(Confirm::EmptyTrash, window, cx);
-                        })),
-                )
+        // What is about the app and the list is under the list. The strip beside
+        // it, under the note, only holds what is about that note.
+        let settings = with_tooltip(
+            button("settings", "", ButtonVariant::Secondary, cx)
+                .accessibility_label("Settings")
+                .debug_selector(|| "settings".into())
+                .child(icon(IconName::Settings))
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            "Settings (Ctrl+,)",
+        );
+        let empty_trash = in_trash.then(|| {
+            button("empty-trash", "Empty Trash", ButtonVariant::Outline, cx)
+                .debug_selector(|| "empty-trash".into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.ask(Confirm::EmptyTrash, window, cx);
+                }))
         });
+        let footer = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .h(rems(2.75))
+            // The gear's own padding sets its icon in line with the titles.
+            .pl(rems(0.0625))
+            .pr(rems(0.5))
+            .border_t_1()
+            .border_color(t.divider())
+            .child(settings)
+            .children(empty_trash);
 
         div()
             .flex()
@@ -1070,7 +1082,7 @@ impl Brouyon {
             .child(header)
             .children(filter)
             .child(div().flex_1().min_h_0().child(list))
-            .children(footer)
+            .child(footer)
     }
 
     fn render_row(
@@ -1195,15 +1207,14 @@ impl Brouyon {
         };
         let actions = div().flex().flex_shrink_0().gap(rems(0.25));
         let actions = match self.selection.clone() {
-            Selection::Note(_) => actions.child(
-                button(
-                    "move-to-trash",
-                    "Move to Trash",
-                    ButtonVariant::Secondary,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.move_to_trash(window, cx))),
-            ),
+            Selection::Note(_) => actions.child(with_tooltip(
+                button("move-to-trash", "", ButtonVariant::Secondary, cx)
+                    .accessibility_label("Move to Trash")
+                    .debug_selector(|| "move-to-trash".into())
+                    .child(icon(IconName::Trash))
+                    .on_click(cx.listener(|this, _, window, cx| this.move_to_trash(window, cx))),
+                "Move to Trash (Ctrl+Shift+Backspace)",
+            )),
             Selection::Trashed(id) => {
                 let restore = id.clone();
                 actions
@@ -1230,19 +1241,26 @@ impl Brouyon {
             }
             _ => actions,
         };
-        // A narrow window has no room for them beside the rest. The key still works.
-        let copy = (self.selection != Selection::Blank && !is_narrow(window))
-            .then(|| self.copy_buttons(cx));
+        // A narrow window has no room for them beside Restore and Delete forever.
+        // The key still works.
+        let copy = match self.selection {
+            Selection::Blank => false,
+            Selection::Note(_) => true,
+            Selection::Trashed(_) => !is_narrow(window),
+        }
+        .then(|| self.copy_buttons(cx));
+        let copying = copy.is_some();
         // Gone with its button, so that it doesn't come back open.
-        self.copy_menu_open &= copy.is_some();
-        let settings = with_tooltip(
-            button("settings", "", ButtonVariant::Secondary, cx)
-                .accessibility_label("Settings")
-                .debug_selector(|| "settings".into())
-                .child(icon(IconName::Settings))
-                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            "Settings (Ctrl+,)",
-        );
+        self.copy_menu_open &= copying;
+        // Copying is at one end and the Trash at the other, so that reaching for
+        // the first can't land on the second.
+        let left = div()
+            .flex()
+            .items_center()
+            .gap(rems(0.75))
+            .min_w_0()
+            .children(copy)
+            .child(div().truncate().child(status));
         div()
             .flex()
             .flex_shrink_0()
@@ -1250,14 +1268,16 @@ impl Brouyon {
             .justify_between()
             .gap(rems(0.75))
             .h(rems(2.75))
-            .pl(rems(1.5))
+            // In line with the note's text: the status, or the copy button's icon,
+            // which the button's own padding sets in.
+            .pl(rems(if copying { 0.8125 } else { 1.5 }))
             .pr(rems(0.125))
             .border_t_1()
             .border_color(t.divider())
             .text_size(rems(0.6875))
             .text_color(t.secondary)
-            .child(div().truncate().child(status))
-            .child(actions.children(copy).child(settings))
+            .child(left)
+            .child(actions)
     }
 
     /// The button that copies the note in the format last chosen, and beside it
@@ -1270,11 +1290,15 @@ impl Brouyon {
             button("copy-note", "", ButtonVariant::Secondary, cx)
                 .accessibility_label(label.clone())
                 .debug_selector(|| "copy-note".into())
-                .child(icon(if self.copied.is_some() {
-                    IconName::Check
-                } else {
-                    IconName::Copy
-                }))
+                .child(
+                    icon(if self.copied.is_some() {
+                        IconName::Check
+                    } else {
+                        IconName::Copy
+                    })
+                    .size(rems(0.875)),
+                )
+                .child("Copy")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.copy_note(format, cx);
                     this.focus_content(window, cx);
@@ -1307,7 +1331,7 @@ impl Brouyon {
             },
         )
         // The strip is at the bottom of the window, so the menu opens above it.
-        .anchor(Anchor::BottomRight)
+        .anchor(Anchor::BottomLeft)
         // Kept here so that whatever takes the keyboard elsewhere can close the menu.
         .open(self.copy_menu_open)
         .on_open_change(move |open, window, cx| {
@@ -1320,7 +1344,12 @@ impl Brouyon {
                 cx.notify();
             });
         });
-        div().flex().items_center().child(copy).child(formats)
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .child(copy)
+            .child(formats)
     }
 
     fn confirm_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -1556,8 +1585,8 @@ impl Render for Brouyon {
     }
 }
 
-/// Too narrow for everything, so the list is thinner and the buttons with a key
-/// to do the same are left out.
+/// Too narrow for everything, so the list is thinner and buttons with a key to
+/// do the same are left out where they'd crowd the rest.
 fn is_narrow(window: &Window) -> bool {
     window.viewport_size().width < rems(45.).to_pixels(window.rem_size())
 }
@@ -2050,6 +2079,23 @@ pub(crate) mod tests {
         assert!(matches!(selection(&view, cx), Selection::Note(_)));
         assert_eq!(note_texts(dir.path()), ["keep me"]);
         assert!(trashed_texts(dir.path()).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn the_trash_button_is_at_the_other_end_of_the_strip_from_copy(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        type_and_save(cx, "keep me");
+        let copy = cx.debug_bounds("copy-as").unwrap();
+        let trash = cx.debug_bounds("move-to-trash").unwrap();
+        let strip = trash.right() - copy.left();
+        assert!(
+            trash.left() - copy.right() > strip / 2.,
+            "{copy:?} and {trash:?} are too close"
+        );
+
+        click("move-to-trash", cx);
+        assert_eq!(selection(&view, cx), Selection::Blank);
+        assert_eq!(trashed_texts(dir.path()), ["keep me"]);
     }
 
     #[gpui_kit::test]
@@ -2852,13 +2898,24 @@ pub(crate) mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_narrow_window_drops_the_copy_buttons_and_keeps_the_key(cx: &mut TestAppContext) {
-        let (_dir, _view, cx) = open_marked_up(cx);
-        cx.simulate_resize(size(px(500.), px(420.)));
+    fn a_narrow_window_has_the_copy_buttons_except_in_the_trash(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        cx.simulate_resize(size(px(480.), px(420.)));
         draw(cx);
+        let window = cx.update(|window, _| window.viewport_size().width);
+        let fits = |selector, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector)
+                .is_some_and(|bounds| bounds.right() <= window)
+        };
+        assert!(fits("copy-note", cx) && fits("copy-as", cx));
+        assert!(fits("move-to-trash", cx) && fits("settings", cx));
+
+        keys(cx, "ctrl-shift-backspace");
+        keys(cx, "ctrl-shift-t");
+        assert!(selection(&view, cx).in_trash());
         assert!(cx.debug_bounds("copy-note").is_none());
         assert!(cx.debug_bounds("copy-as").is_none());
-        assert!(cx.debug_bounds("settings").is_some());
+        assert!(fits("settings", cx));
         keys(cx, "ctrl-shift-c");
         assert_eq!(clipboard(cx).as_deref(), Some(MARKED_UP));
     }
@@ -3155,7 +3212,7 @@ pub(crate) mod tests {
 
         let mut cx = HeadlessAppContext::with_platform(
             gpui_kit::platform::current_platform(true).text_system(),
-            Arc::new(gpui_kit::assets::Assets),
+            Arc::new(crate::assets::Assets),
             gpui_kit::platform::current_headless_renderer,
         );
         // As `main` starts, so that these pictures show what a real window does.

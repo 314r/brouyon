@@ -86,7 +86,7 @@ line again. `sudo pacman -R brouyon` removes it and leaves your notes alone.
    ```
 3. **Move between notes** with `Alt+↑` and `Alt+↓`, or click one. `Ctrl+N` starts a new one,
    and `F1` shows every shortcut.
-4. **Change the settings** with the gear at the bottom right, or `Ctrl+,`: the theme, the text
+4. **Change the settings** with the gear at the bottom left, or `Ctrl+,`: the theme, the text
    size, the notes folder and the delay before a blank note.
 
 <img width="100%" alt="Brouyon's Settings window over the list of notes, on its Notes page, with the notes folder, the buttons to change or open it, and the delay before a blank note" src="screenshots/screenshot-2026-11-13_21-45-47-brouyon.png" />

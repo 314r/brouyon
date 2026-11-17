@@ -2,6 +2,7 @@
 extern crate gpui_kit as gpui;
 
 mod app;
+mod assets;
 mod config;
 mod desktop;
 mod lists;
@@ -70,7 +71,7 @@ fn main() {
     };
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_omarchy::init(cx);
             app::init(cx);

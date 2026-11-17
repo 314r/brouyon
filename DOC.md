@@ -55,8 +55,8 @@ one you chose last:
   text followed by its address in brackets. Lists, tasks, quotes and your line breaks stay
   as you typed them.
 
-Notes in the Trash can be copied too. A narrow window has no room for the button, but the
-key still works.
+Notes in the Trash can be copied too. There, a narrow window has no room for the button,
+but the key still works.
 
 ## Your notes
 
@@ -74,7 +74,7 @@ and left untouched. A note that you empty completely has its file removed.
 
 ## Settings
 
-The gear at the bottom right, or `Ctrl+,`, opens a floating window for the theme, the
+The gear under the list of notes, or `Ctrl+,`, opens a floating window for the theme, the
 text size, the notes folder and the delay before a blank note. Moving to another folder
 leaves existing notes where they are.
 
