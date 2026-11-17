@@ -717,10 +717,16 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn it_is_a_floating_window_with_its_own_app_id(cx: &mut TestAppContext) {
+    fn it_floats_on_linux_and_has_its_own_app_id(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let options = cx.update(|_, cx| window_options(view.read(cx).config(), cx));
-        assert_eq!(options.kind, WindowKind::Floating);
+        // A floating window on macOS is a panel that stays above every other window.
+        let kind = if cfg!(target_os = "macos") {
+            WindowKind::Normal
+        } else {
+            WindowKind::Floating
+        };
+        assert_eq!(options.kind, kind);
         assert_eq!(options.app_id.as_deref(), Some("brouyon-settings"));
     }
 
