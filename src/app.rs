@@ -209,6 +209,8 @@ pub struct Brouyon {
     settings_window: Option<WindowHandle<SettingsWindow>>,
     save_task: Option<Task<()>>,
     idle_task: Option<Task<()>>,
+    /// How many words the editor holds, kept up as they are typed.
+    words: usize,
     /// How the open note was just copied, for the strip to say so.
     copied: Option<CopyFormat>,
     copied_task: Option<Task<()>>,
@@ -263,6 +265,7 @@ impl Brouyon {
             settings_window: None,
             save_task: None,
             idle_task: None,
+            words: 0,
             copied: None,
             copied_task: None,
             copy_menu_open: false,
@@ -293,6 +296,7 @@ impl Brouyon {
         cx: &mut Context<Self>,
     ) {
         self.editor = build_editor(text, readonly, window, cx);
+        self.words = markdown::word_count(text);
         self._editor_events = cx.subscribe_in(&self.editor, window, Self::on_editor_event);
         self.focus_content(window, cx);
     }
@@ -307,6 +311,11 @@ impl Brouyon {
         match event {
             InputEvent::Change => {
                 self.dirty = true;
+                let words = markdown::word_count(&self.editor.read(cx).value());
+                if words != self.words {
+                    self.words = words;
+                    cx.notify();
+                }
                 self.restart_idle_timer(window, cx);
                 self.save_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(SAVE_DELAY).await;
@@ -1250,6 +1259,16 @@ impl Brouyon {
         }
         .then(|| self.copy_buttons(cx));
         let copying = copy.is_some();
+        let noted = self.selection != Selection::Blank;
+        // A narrow window has no room for it. A blank note has none to count.
+        let words = (!is_narrow(window) && (noted || self.words > 0)).then(|| {
+            div()
+                .debug_selector(|| "word-count".into())
+                .child(match self.words {
+                    1 => "1 word".to_owned(),
+                    words => format!("{words} words"),
+                })
+        });
         // Gone with its button, so that it doesn't come back open.
         self.copy_menu_open &= copying;
         // Copying is at one end and the Trash at the other, so that reaching for
@@ -1277,7 +1296,18 @@ impl Brouyon {
             .text_size(rems(0.6875))
             .text_color(t.secondary)
             .child(left)
-            .child(actions)
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(rems(0.5))
+                    // A note just begun has no button there to keep the count
+                    // off the edge.
+                    .when(!noted, |right| right.pr(rems(0.625)))
+                    .children(words)
+                    .child(actions),
+            )
     }
 
     /// The button that copies the note in the format last chosen, and beside it
@@ -2969,6 +2999,35 @@ pub(crate) mod tests {
         assert!(!menu_is_open(cx), "a click outside it");
         assert!(editor_is_focused(&view, cx));
         assert_eq!(clipboard(cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn the_strip_counts_the_words_as_they_are_typed(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_marked_up(cx);
+        let words = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).words);
+        let shown = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.debug_bounds("word-count").is_some()
+        };
+        assert_eq!(words(cx), 4, "without the # and the **");
+        assert!(shown(cx));
+
+        keys(cx, "ctrl-n");
+        assert_eq!(words(cx), 0);
+        assert!(!shown(cx), "a blank note has none to count");
+        cx.simulate_input("- [ ] three more words");
+        assert_eq!(words(cx), 3, "before it is saved");
+        assert!(shown(cx));
+        let count = cx.debug_bounds("word-count").unwrap();
+        let window = cx.update(|window, _| window.viewport_size().width);
+        assert!(count.right() < window - px(8.), "off the edge: {count:?}");
+        keys(cx, "ctrl-z");
+        assert_eq!(words(cx), 0);
+
+        keys(cx, "alt-down");
+        assert_eq!(words(cx), 4);
+        cx.simulate_resize(size(px(480.), px(420.)));
+        assert!(!shown(cx), "no room in a narrow window");
     }
 
     #[gpui_kit::test]

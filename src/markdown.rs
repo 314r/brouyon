@@ -1,4 +1,5 @@
-//! Markdown highlighting for the editor, and a note's text without its Markdown.
+//! Markdown highlighting for the editor, a note's text without its Markdown, and
+//! how many words it holds.
 //! Each edit reparses the whole note, which is fine at note size. Colors are
 //! resolved from the theme on every render, so they follow a theme change without
 //! reparsing.
@@ -184,6 +185,47 @@ pub fn plain_text(text: &str) -> String {
     }
     plain.push_str(&text[kept_to..]);
     plain
+}
+
+/// How many words someone reading `text` would count: what is written, without the
+/// marks around it, the bullet, number or box of a list item, or a link's address.
+/// Something with no letter or digit in it, such as a dash, isn't a word.
+pub fn word_count(text: &str) -> usize {
+    let mut count = 0;
+    // The word being read has a letter or a digit in it.
+    let mut counts = false;
+    for event in Parser::new_ext(text, OPTIONS) {
+        let read = match &event {
+            Event::Text(read) | Event::Code(read) => read.as_ref(),
+            // Styling can begin and end inside a word, which is still one word.
+            Event::InlineHtml(_)
+            | Event::Start(
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+                | Tag::Image { .. },
+            )
+            | Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Link
+                | TagEnd::Image,
+            ) => "",
+            // Anything else ends a word: a new line, the next paragraph or item.
+            _ => " ",
+        };
+        for character in read.chars() {
+            if character.is_whitespace() {
+                count += usize::from(counts);
+                counts = false;
+            } else {
+                counts |= character.is_alphanumeric();
+            }
+        }
+    }
+    count + usize::from(counts)
 }
 
 /// Adds the edits that take `piece`'s own marks out, now that its extent is known.
@@ -546,6 +588,39 @@ mod tests {
             plain_text("**unterminated *nest\n`open\n"),
             "**unterminated *nest\n`open\n"
         );
+    }
+
+    #[test]
+    fn words_are_counted_as_someone_reading_the_note_would() {
+        assert_eq!(word_count(""), 0);
+        assert_eq!(word_count("  \n\n "), 0);
+        assert_eq!(word_count("one"), 1);
+        assert_eq!(word_count("one two\nthree\n\nfour  five"), 5);
+        assert_eq!(word_count("l'été à 9 h, c'est-à-dire tôt"), 6);
+        assert_eq!(word_count("日本語 テキスト"), 2);
+        assert_eq!(word_count("wait — what? ... & so on"), 4);
+    }
+
+    #[test]
+    fn markdown_itself_is_not_counted() {
+        assert_eq!(word_count("# Title\n\n## Another one ##\n"), 3);
+        assert_eq!(
+            word_count("- one\n- two\n  - three\n\n1. four\n2. five\n"),
+            5
+        );
+        assert_eq!(word_count("- [x] done\n- [ ] to do\n"), 3);
+        assert_eq!(word_count("> quoted words\n\n---\n\nafter"), 3);
+        assert_eq!(word_count("see [the site](https://omarchy.org/a/b) now"), 4);
+        assert_eq!(word_count("```rust\nlet x = 1;\n```\n"), 3);
+        assert_eq!(word_count("some `inline code` here"), 4);
+    }
+
+    #[test]
+    fn styling_inside_a_word_leaves_it_one_word() {
+        assert_eq!(word_count("un**believ**able *it*self ~~no~~pe"), 3);
+        assert_eq!(word_count("AT&amp;T and a\\*b"), 3);
+        assert_eq!(word_count("**bold** *italic*"), 2);
+        assert_eq!(word_count("end of one\n**start** of the next"), 7);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Brouyon in detail
 
 The [README](README.md) covers what Brouyon is and how to install it. This page has the rest:
-every shortcut, how finding, lists and copying work, where your notes live, the settings
-file, and how to work on the code.
+every shortcut, how finding, lists, copying and the word count work, where your notes live,
+the settings file, and how to work on the code.
 
 ![Brouyon showing a note in Markdown, with a heading, a task list, a quote and inline code, and the list of notes on its left](screenshots/markdown-note.png)
 
@@ -57,6 +57,12 @@ one you chose last:
 
 Notes in the Trash can be copied too. There, a narrow window has no room for the button,
 but the key still works.
+
+## Counting words
+
+The strip under the note shows how many words it holds, as you type them. It counts what
+someone reading the note would: Markdown marks, the bullet, number or box of a list item,
+and the address of a link are left out. A narrow window has no room for the count.
 
 ## Your notes
 
