@@ -123,9 +123,13 @@ what a Mac expects of an app:
 - Closing the window quits Brouyon, after saving the note, as on Linux.
 - The window's buttons sit at the top left, over the list. The empty part of the header, and
   the edge above the note, move the window, and a double click zooms it.
-- The theme called Omarchy is called System, and follows macOS between light and dark. In
-  `config.toml` it is still `omarchy`. Nothing else follows the desktop: the window is solid,
-  its corners square, and its font Menlo.
+- The theme called Omarchy is called System, and follows macOS between light and dark:
+  [Flexoki](https://stephango.com/flexoki) by Steph Ango in light, and
+  [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme) by Enkia in dark,
+  the same palettes as the Light and Dark themes. In `config.toml` it is still `omarchy`.
+- Every theme takes the accent colour chosen in System Settings, for the note being shown
+  among others. The list lets the desktop show through, the corners are rounded as a Mac's
+  are, and the font is Menlo. Nothing else follows the desktop.
 - Notes and settings are in the same places: `~/.local/share/brouyon/` and
   `~/.config/brouyon/config.toml`.
 

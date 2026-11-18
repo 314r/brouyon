@@ -16,7 +16,6 @@ mod title_bar;
 
 use app::Brouyon;
 use config::Config;
-use desktop::Desktop;
 use gpui_kit::{App, AppContext, Bounds, WindowBounds, WindowDecorations, WindowOptions, px, size};
 use std::io;
 use store::Store;
@@ -54,7 +53,7 @@ fn window_options(cx: &App) -> WindowOptions {
         app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
         // Set from the start, so the first frame isn't a solid one.
-        window_background: cx.global::<Desktop>().transparency.surface(),
+        window_background: desktop::surface(cx),
         window_min_size: Some(size(px(480.), px(320.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
@@ -96,7 +95,7 @@ fn main() {
                     brouyon
                 });
                 #[cfg(target_os = "macos")]
-                macos::follow_appearance(&brouyon, window);
+                macos::follow_appearance(&brouyon, window, cx);
                 brouyon
             })
             .expect("open window");
@@ -107,10 +106,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desktop::Transparency;
+    use desktop::{Desktop, Transparency};
     use gpui_kit::{TestAppContext, WindowBackgroundAppearance};
     use std::fs;
 
+    /// A Mac has no transparency modes: its sidebar is always tinted over a blur.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn the_window_opens_over_a_blur_whatever_the_mode(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            desktop::init(cx);
+            for mode in [Transparency::Opaque, Transparency::Glassy] {
+                cx.global_mut::<Desktop>().transparency = mode;
+                assert_eq!(
+                    window_options(cx).window_background,
+                    WindowBackgroundAppearance::Blurred
+                );
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn the_window_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
         cx.update(|cx| {

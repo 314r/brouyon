@@ -7,7 +7,9 @@
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use crate::config::{home_dir, xdg_dir};
-use gpui_kit::{App, Global, Hsla, SharedString, Window, WindowBackgroundAppearance};
+use gpui_kit::{
+    App, Global, Hsla, SharedString, Window, WindowBackgroundAppearance, transparent_black,
+};
 use gpui_omarchy::ActiveTheme;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
@@ -100,9 +102,27 @@ impl Desktop {
     }
 }
 
+/// What the windows show behind their root: the transparency mode's surface, or on a
+/// Mac, the blur its sidebars are tinted over.
+pub fn surface(cx: &App) -> WindowBackgroundAppearance {
+    if cfg!(target_os = "macos") {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        cx.global::<Desktop>().transparency.surface()
+    }
+}
+
 /// The background of a window's root. Only the root is see-through: dialogs, popups
-/// and tooltips paint the theme's solid background, and should keep doing so.
+/// and tooltips paint the theme's solid background, and should keep doing so. On a
+/// Mac, what the root shows is the sidebar, and [`content_background`] keeps the
+/// rest solid.
 pub fn root_background(window: &Window, cx: &App) -> Hsla {
+    #[cfg(target_os = "macos")]
+    let alpha = {
+        let _ = window;
+        crate::macos::sidebar_opacity(cx.omarchy())
+    };
+    #[cfg(not(target_os = "macos"))]
     let alpha = cx
         .global::<Desktop>()
         .transparency
@@ -110,11 +130,21 @@ pub fn root_background(window: &Window, cx: &App) -> Hsla {
     cx.omarchy().background.opacity(alpha)
 }
 
+/// The background of what sits beside a window's sidebar: none, so the root's shows,
+/// except on a Mac, where only the sidebar is see-through.
+pub fn content_background(cx: &App) -> Hsla {
+    if cfg!(target_os = "macos") {
+        cx.omarchy().background
+    } else {
+        transparent_black()
+    }
+}
+
 /// Keeps every window's surface in step with the desktop. Needs no real desktop.
 pub fn init(cx: &mut App) {
     cx.default_global::<Desktop>();
     cx.observe_global::<Desktop>(|cx| {
-        let surface = cx.global::<Desktop>().transparency.surface();
+        let surface = surface(cx);
         for window in cx.windows() {
             window
                 .update(cx, |_, window, _| {

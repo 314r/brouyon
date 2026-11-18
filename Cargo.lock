@@ -731,6 +731,7 @@ dependencies = [
  "gpui-omarchy",
  "image",
  "notify 7.0.0",
+ "objc2-app-kit 0.3.2",
  "pulldown-cmark",
  "serde",
  "tempfile",

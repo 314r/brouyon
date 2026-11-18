@@ -17,11 +17,12 @@ use gpui_kit::base::{
 };
 use gpui_kit::{
     Anchor, App, ClipboardItem, Context, DispatchPhase, Entity, Focusable, FontWeight, IntoElement,
-    MouseButton, Render, ScrollEvent, ScrollStrategy, SharedString, Styled, Subscription, Task,
-    Window, WindowHandle, canvas, div, prelude::*, px, relative, rems, size, transparent_black,
+    MouseButton, Pixels, Render, ScrollEvent, ScrollStrategy, SharedString, Styled, Subscription,
+    Task, Window, WindowHandle, canvas, div, prelude::*, px, relative, rems, size,
+    transparent_black,
 };
 use gpui_omarchy::{
-    ActiveTheme, ButtonVariant, IconName, MenuItem, Theme, alert_dialog, button, dialog,
+    ActiveTheme, Button, ButtonVariant, IconName, MenuItem, Theme, alert_dialog, button, dialog,
     dialog_button, dialog_description, dialog_popup, dialog_title, icon, input, menu, virtual_list,
     with_tooltip,
 };
@@ -128,6 +129,14 @@ pub fn apply_theme(mode: ThemeMode, cx: &mut App) {
         ThemeMode::Light => Theme::flexoki_light().apply(cx),
         ThemeMode::Dark => Theme::tokyo_night().apply(cx),
     }
+    // On a Mac the system's accent goes over every palette. Each palette also brings
+    // back the corners gpui-omarchy follows, which are square without Hyprland, so a
+    // Mac's go on last.
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::use_system_accent(cx);
+        crate::macos::round_corners(cx);
+    }
     // Not left to the observer: at startup it isn't active yet, and it never hears of
     // this theme, because GPUI drops a notification when one is already queued.
     use_mono_font(cx);
@@ -156,6 +165,86 @@ fn follow_desktop_theme(cx: &mut App) {
 #[cfg(test)]
 fn follow_desktop_theme(cx: &mut App) {
     Theme::system_or_default().apply(cx);
+}
+
+/// The spacing of the note list, in rems. On a Mac each note is a rounded highlight
+/// set in from the list's sides, with space between them and at the list's ends, as
+/// in Finder's sidebar. On Linux the rows fill the list and touch.
+const MAC: bool = cfg!(target_os = "macos");
+/// Between the list's sides and a note's highlight.
+const ROW_INSET: f32 = if MAC { 0.375 } else { 0. };
+/// Between a note's highlight and its text.
+const ROW_PADDING: f32 = if MAC { 0.625 } else { 0.75 };
+/// Between two notes' highlights.
+const ROW_GAP: f32 = if MAC { 0.25 } else { 0. };
+/// Above the first note and below the last, besides half the gap.
+const LIST_END: f32 = if MAC { 0.375 } else { 0. };
+
+/// The colours of a note's row: its highlight, if any, its title and the date and
+/// preview under it.
+struct RowColors {
+    fill: Option<gpui_kit::Hsla>,
+    title: gpui_kit::Hsla,
+    detail: gpui_kit::Hsla,
+}
+
+/// The note being shown stands out in the theme's accent. On a Mac, as in Finder,
+/// its highlight is the system's accent with white text while the window is in front,
+/// and grey once it isn't.
+fn row_colors(t: &Theme, selected: bool, active: bool) -> RowColors {
+    match (selected, MAC, active) {
+        (false, ..) => RowColors {
+            fill: None,
+            title: t.foreground,
+            detail: t.secondary,
+        },
+        (true, false, _) => RowColors {
+            fill: Some(t.hover_fill()),
+            title: t.accent,
+            detail: t.secondary,
+        },
+        (true, true, true) => RowColors {
+            fill: Some(t.accent),
+            title: t.on_accent,
+            detail: t.on_accent.opacity(0.8),
+        },
+        (true, true, false) => RowColors {
+            fill: Some(t.selected_fill()),
+            title: t.foreground,
+            detail: t.secondary,
+        },
+    }
+}
+
+/// The space above and below a note's highlight, in rems: half the gap on each side,
+/// and at the list's ends, its own space besides.
+fn row_spacing(row: usize, count: usize) -> (f32, f32) {
+    let half = ROW_GAP / 2.;
+    let end = |at_end: bool| if at_end { half + LIST_END } else { half };
+    (end(row == 0), end(row + 1 == count))
+}
+
+/// The height of the buttons in the bars along the bottom of the main window, in rems.
+const BAR_BUTTON_HEIGHT: f32 = 1.875;
+
+/// How far a bottom bar's buttons sit from the window's bottom edge: the bar under
+/// its top border, less the button, shared above and below. On a Mac the buttons at
+/// the ends keep as far from the side edges, so their corners can follow the
+/// window's.
+fn bar_inset(window: &Window) -> Pixels {
+    let rem = window.rem_size();
+    (rems(BAR_HEIGHT).to_pixels(rem) - px(1.) - rems(BAR_BUTTON_HEIGHT).to_pixels(rem)) / 2.
+}
+
+/// A button in a bottom bar. On a Mac its corners are concentric with the window's:
+/// as round as the window's, less the distance between them.
+fn bar_button(button: Button, window: &Window) -> Button {
+    let button = button.h(rems(BAR_BUTTON_HEIGHT));
+    #[cfg(target_os = "macos")]
+    let button = button.rounded((px(crate::macos::WINDOW_CORNER) - bar_inset(window)).max(px(0.)));
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+    button
 }
 
 /// What the editor pane is showing. The list being shown follows from it.
@@ -1051,14 +1140,25 @@ impl Brouyon {
         let row_height = rems(3.25).to_pixels(window.rem_size());
         let rows = Rc::new(self.rows());
         let nothing_found = rows.is_empty() && !self.filter_terms.is_empty();
-        let sizes = Rc::new(vec![size(gpui_kit::Pixels::ZERO, row_height); rows.len()]);
+        let count = rows.len();
+        let sizes = Rc::new(
+            (0..count)
+                .map(|row| {
+                    let around = row_spacing(row, count);
+                    let around = rems(around.0 + around.1).to_pixels(window.rem_size());
+                    size(gpui_kit::Pixels::ZERO, row_height + around)
+                })
+                .collect::<Vec<_>>(),
+        );
         let list = virtual_list(
             cx.entity(),
             "note-list",
             sizes,
-            move |this, range, _, cx| {
+            move |this, range, window, cx| {
                 range
-                    .filter_map(|row| Some(this.render_row(row, rows.get(row)?, row_height, cx)))
+                    .filter_map(|row| {
+                        Some(this.render_row(row, count, rows.get(row)?, row_height, window, cx))
+                    })
                     .collect::<Vec<_>>()
             },
             cx,
@@ -1082,19 +1182,25 @@ impl Brouyon {
         // What is about the app and the list is under the list. The strip beside
         // it, under the note, only holds what is about that note.
         let settings = with_tooltip(
-            button("settings", "", ButtonVariant::Secondary, cx)
-                .accessibility_label("Settings")
-                .debug_selector(|| "settings".into())
-                .child(icon(IconName::Settings))
-                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            bar_button(
+                button("settings", "", ButtonVariant::Secondary, cx)
+                    .accessibility_label("Settings")
+                    .debug_selector(|| "settings".into())
+                    .child(icon(IconName::Settings))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                window,
+            ),
             format!("Settings ({})", shortcuts::SETTINGS),
         );
         let empty_trash = in_trash.then(|| {
-            button("empty-trash", "Empty Trash", ButtonVariant::Outline, cx)
-                .debug_selector(|| "empty-trash".into())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.ask(Confirm::EmptyTrash, window, cx);
-                }))
+            bar_button(
+                button("empty-trash", "Empty Trash", ButtonVariant::Outline, cx),
+                window,
+            )
+            .debug_selector(|| "empty-trash".into())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.ask(Confirm::EmptyTrash, window, cx);
+            }))
         });
         let footer = div()
             .flex()
@@ -1102,8 +1208,13 @@ impl Brouyon {
             .items_center()
             .justify_between()
             .h(rems(BAR_HEIGHT))
-            // The gear's own padding sets its icon in line with the titles.
-            .pl(rems(0.0625))
+            // The gear's own padding sets its icon in line with the titles, except on
+            // a Mac, where it keeps off the window's corner.
+            .pl(if cfg!(target_os = "macos") {
+                bar_inset(window)
+            } else {
+                rems(0.0625).to_pixels(window.rem_size())
+            })
             .pr(rems(0.5))
             .border_t_1()
             .border_color(t.divider())
@@ -1127,8 +1238,10 @@ impl Brouyon {
     fn render_row(
         &self,
         row: usize,
+        count: usize,
         selection: &Selection,
         height: gpui_kit::Pixels,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let t = cx.omarchy().clone();
@@ -1156,18 +1269,24 @@ impl Brouyon {
             ),
             None => ("New note".into(), "".into(), "".into()),
         };
-        div()
+        let colors = row_colors(&t, selected, window.is_window_active());
+        let (above, below) = row_spacing(row, count);
+        let row = div()
             .id(("note-row", row))
+            .debug_selector(move || format!("note-row-{row}"))
             .flex()
             .flex_col()
             .justify_center()
             .flex_shrink_0()
             .w_full()
             .h(height)
-            .px(rems(0.75))
+            .px(rems(ROW_PADDING))
             .overflow_hidden()
-            .when(selected, |row| row.bg(t.hover_fill()))
-            .hover(|row| row.bg(t.hover_fill()))
+            .when(ROW_INSET > 0., |row| {
+                row.rounded(gpui_kit::base::Theme::global(cx).tokens.radius.md)
+            })
+            .when_some(colors.fill, |row, fill| row.bg(fill))
+            .when(!selected, |row| row.hover(|row| row.bg(t.hover_fill())))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select(selection.clone(), window, cx);
             }))
@@ -1181,7 +1300,7 @@ impl Brouyon {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(if selected { t.accent } else { t.foreground })
+                            .text_color(colors.title)
                             .when(selected, |title| title.font_weight(FontWeight::BOLD))
                             .child(title),
                     )
@@ -1189,7 +1308,7 @@ impl Brouyon {
                         div()
                             .flex_shrink_0()
                             .text_size(rems(0.6875))
-                            .text_color(t.secondary)
+                            .text_color(colors.detail)
                             .child(date),
                     ),
             )
@@ -1198,9 +1317,16 @@ impl Brouyon {
                 div()
                     .truncate()
                     .text_size(rems(0.6875))
-                    .text_color(t.secondary)
+                    .text_color(colors.detail)
                     .child(preview),
-            )
+            );
+        div()
+            .flex_shrink_0()
+            .w_full()
+            .px(rems(ROW_INSET))
+            .pt(rems(above))
+            .pb(rems(below))
+            .child(row)
     }
 
     fn editor_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1211,6 +1337,7 @@ impl Brouyon {
             .flex_1()
             .min_w_0()
             .h_full()
+            .bg(desktop::content_background(cx))
             .child(
                 div()
                     .flex_1()
@@ -1260,29 +1387,39 @@ impl Brouyon {
         let actions = div().flex().flex_shrink_0().gap(rems(0.25));
         let actions = match self.selection.clone() {
             Selection::Note(_) => actions.child(with_tooltip(
-                button("move-to-trash", "", ButtonVariant::Secondary, cx)
-                    .accessibility_label("Move to Trash")
-                    .debug_selector(|| "move-to-trash".into())
-                    .child(icon(IconName::Trash))
-                    .on_click(cx.listener(|this, _, window, cx| this.move_to_trash(window, cx))),
+                bar_button(
+                    button("move-to-trash", "", ButtonVariant::Secondary, cx),
+                    window,
+                )
+                .accessibility_label("Move to Trash")
+                .debug_selector(|| "move-to-trash".into())
+                .child(icon(IconName::Trash))
+                .on_click(cx.listener(|this, _, window, cx| this.move_to_trash(window, cx))),
                 format!("Move to Trash ({})", shortcuts::MOVE_TO_TRASH),
             )),
             Selection::Trashed(id) => {
                 let restore = id.clone();
                 actions
                     .child(
-                        button("restore", "Restore", ButtonVariant::Secondary, cx).on_click(
-                            cx.listener(move |this, _, window, cx| {
+                        bar_button(
+                            button("restore", "Restore", ButtonVariant::Secondary, cx),
+                            window,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
                                 this.restore(restore.clone(), window, cx);
-                            }),
-                        ),
+                            },
+                        )),
                     )
                     .child(
-                        button(
-                            "delete-forever",
-                            "Delete forever",
-                            ButtonVariant::Danger,
-                            cx,
+                        bar_button(
+                            button(
+                                "delete-forever",
+                                "Delete forever",
+                                ButtonVariant::Danger,
+                                cx,
+                            ),
+                            window,
                         )
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
@@ -1300,7 +1437,7 @@ impl Brouyon {
             Selection::Note(_) => true,
             Selection::Trashed(_) => !is_narrow(window),
         }
-        .then(|| self.copy_buttons(cx));
+        .then(|| self.copy_buttons(window, cx));
         let copying = copy.is_some();
         let noted = self.selection != Selection::Blank;
         // A narrow window has no room for it. A blank note has none to count.
@@ -1333,7 +1470,13 @@ impl Brouyon {
             // In line with the note's text: the status, or the copy button's icon,
             // which the button's own padding sets in.
             .pl(rems(if copying { 0.8125 } else { 1.5 }))
-            .pr(rems(0.125))
+            // On a Mac, the button in the corner keeps as far off the side as off the
+            // bottom.
+            .pr(if cfg!(target_os = "macos") {
+                bar_inset(window)
+            } else {
+                rems(0.125).to_pixels(window.rem_size())
+            })
             .border_t_1()
             .border_color(t.divider())
             .text_size(rems(0.6875))
@@ -1355,30 +1498,37 @@ impl Brouyon {
 
     /// The button that copies the note in the format last chosen, and beside it
     /// the menu that copies it in either one.
-    fn copy_buttons(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn copy_buttons(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let format = self.config.copy_as;
         let pressed = cx.omarchy().pressed_fill();
         let label = format!("Copy as {}", format.label());
         let copy = with_tooltip(
-            button("copy-note", "", ButtonVariant::Secondary, cx)
-                .accessibility_label(label.clone())
-                .debug_selector(|| "copy-note".into())
-                .child(
-                    icon(if self.copied.is_some() {
-                        IconName::Check
-                    } else {
-                        IconName::Copy
-                    })
-                    .size(rems(0.875)),
-                )
-                .child("Copy")
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.copy_note(format, cx);
-                    this.focus_content(window, cx);
-                })),
+            bar_button(
+                button("copy-note", "", ButtonVariant::Secondary, cx),
+                window,
+            )
+            .accessibility_label(label.clone())
+            .debug_selector(|| "copy-note".into())
+            .child(
+                icon(if self.copied.is_some() {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                })
+                .size(rems(0.875)),
+            )
+            .child("Copy")
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.copy_note(format, cx);
+                this.focus_content(window, cx);
+            })),
             format!("{label} ({})", shortcuts::COPY_NOTE),
         );
-        let trigger = button("copy-as", "", ButtonVariant::Secondary, cx)
+        let trigger = bar_button(button("copy-as", "", ButtonVariant::Secondary, cx), window)
             .accessibility_label("Choose what to copy")
             .debug_selector(|| "copy-as".into())
             .px(rems(0.125))
@@ -2070,6 +2220,52 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["private"]);
     }
 
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn notes_are_spaced_highlights_set_in_from_the_list_on_a_mac(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "aaa").unwrap();
+        fs::write(dir.path().join("b.md"), "bbb").unwrap();
+        let (_dir, _view, cx) = open_with(cx, dir);
+        let rem = cx.update(|window, _| window.rem_size());
+        let (first, second) = (
+            cx.debug_bounds("note-row-0").unwrap(),
+            cx.debug_bounds("note-row-1").unwrap(),
+        );
+        let gap = second.top() - first.bottom();
+        assert!(
+            (gap - rems(ROW_GAP).to_pixels(rem)).abs() < px(0.5),
+            "{gap:?}"
+        );
+        assert_eq!(first.left(), rems(ROW_INSET).to_pixels(rem));
+        assert_eq!(
+            row_spacing(0, 2).0,
+            ROW_GAP / 2. + LIST_END,
+            "room above the first"
+        );
+        assert_eq!(
+            row_spacing(1, 2).1,
+            ROW_GAP / 2. + LIST_END,
+            "and below the last"
+        );
+    }
+
+    #[test]
+    fn the_shown_note_stands_out() {
+        let t = Theme::flexoki_light();
+        let plain = row_colors(&t, false, true);
+        assert!(plain.fill.is_none());
+        let shown = row_colors(&t, true, true);
+        if cfg!(target_os = "macos") {
+            assert_eq!(shown.fill, Some(t.accent));
+            assert_eq!(shown.title, t.on_accent, "readable on the accent");
+            assert_eq!(row_colors(&t, true, false).fill, Some(t.selected_fill()));
+        } else {
+            assert_eq!(shown.fill, Some(t.hover_fill()));
+            assert_eq!(shown.title, t.accent);
+        }
+    }
+
     #[gpui_kit::test]
     fn undo_cannot_cross_between_existing_notes(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -2164,6 +2360,29 @@ pub(crate) mod tests {
         assert!(matches!(selection(&view, cx), Selection::Note(_)));
         assert_eq!(note_texts(dir.path()), ["keep me"]);
         assert!(trashed_texts(dir.path()).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn the_buttons_in_the_bottom_corners_keep_as_far_from_both_edges(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open(cx);
+        type_and_save(cx, "keep me");
+        let window = cx.update(|window, _| window.viewport_size());
+        let settings = cx.debug_bounds("settings").unwrap();
+        let trash = cx.debug_bounds("move-to-trash").unwrap();
+        for (bottom, side) in [
+            (window.height - settings.bottom(), settings.left()),
+            (window.height - trash.bottom(), window.width - trash.right()),
+        ] {
+            assert!(
+                (bottom - side).abs() < px(0.5),
+                "{bottom:?} below, {side:?} beside"
+            );
+            assert!(
+                side < px(crate::macos::WINDOW_CORNER),
+                "within the window's corner"
+            );
+        }
     }
 
     #[gpui_kit::test]
@@ -3130,6 +3349,21 @@ pub(crate) mod tests {
         draw(cx);
     }
 
+    /// On a Mac the root is the sidebar, tinted over the blur, and the note is solid.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn only_the_sidebar_shows_through_on_a_mac(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open(cx);
+        cx.update(|window, cx| {
+            let root = desktop::root_background(window, cx);
+            assert_eq!(root.a, crate::macos::sidebar_opacity(cx.omarchy()));
+            assert!(root.a < 1., "the sidebar shows through");
+            assert_eq!(desktop::content_background(cx).a, 1.);
+            assert_eq!(cx.omarchy().background.a, 1., "dialogs paint this one");
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn only_the_root_background_follows_the_transparency_mode(cx: &mut TestAppContext) {
         let (_dir, _view, cx) = open(cx);
@@ -3161,6 +3395,35 @@ pub(crate) mod tests {
             assert_eq!(theme.name, Theme::flexoki_light().name);
             assert_eq!(theme.mono_font, "Another Mono", "the font still follows");
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn mac_corners_survive_every_theme(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let (small, control) = crate::macos::CORNERS;
+        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
+            view.update(cx, |this, cx| this.set_theme(mode, cx));
+            cx.update(|_, cx| {
+                let radius = gpui_kit::base::Theme::global(cx).tokens.radius;
+                assert_eq!(radius.sm, px(small), "{mode:?}");
+                assert_eq!(radius.md, px(control), "{mode:?}");
+                assert!(radius.full >= px(9999.), "{mode:?}: switches are capsules");
+            });
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn every_theme_takes_the_system_accent_on_a_mac(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let Some(accent) = crate::macos::system_accent() else {
+            return;
+        };
+        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
+            view.update(cx, |this, cx| this.set_theme(mode, cx));
+            cx.update(|_, cx| assert_eq!(cx.omarchy().accent, accent, "{mode:?}"));
+        }
     }
 
     #[gpui_kit::test]

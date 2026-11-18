@@ -19,8 +19,9 @@ pub const BAR_HEIGHT: f32 = 2.75;
 const BUTTONS_WIDTH: f32 = 3. * 14. + 2. * 6.;
 const BUTTONS_HEIGHT: f32 = 14.;
 const BUTTONS_LEFT: f32 = 16.;
-/// Space between the last button and what follows it in the bar.
-const AFTER_BUTTONS: f32 = 12.;
+/// Space between the last button and what follows it in the bar: more than the
+/// buttons keep from the window's edge, so the first tab reads as apart from them.
+const AFTER_BUTTONS: f32 = 24.;
 /// A rem at the default text size, which places the buttons until the first frame
 /// knows the real one.
 const DEFAULT_REM: f32 = 16.;

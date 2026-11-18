@@ -157,6 +157,9 @@ It runs on macOS too, where it follows the system between light and dark instead
   **[gpui-omarchy](https://github.com/huacnlee/gpui-omarchy)** by Jason Lee draw the window.
   Brouyon's folder watcher is adapted from gpui-omarchy's.
 - **[Omarchy](https://omarchy.org)** set the look.
+- **[Flexoki](https://stephango.com/flexoki)** by Steph Ango and
+  **[Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme)** by Enkia colour the
+  Light and Dark themes, and on macOS the System theme, which switches between them.
 - **[Lucide](https://lucide.dev)** made the icons, and
   **[pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark)** reads the Markdown.
 - The script that writes [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt) is adapted from

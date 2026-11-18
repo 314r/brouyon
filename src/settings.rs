@@ -111,7 +111,7 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
         app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
         // Set from the start, so the first frame isn't a solid one.
-        window_background: desktop.transparency.surface(),
+        window_background: desktop::surface(cx),
         window_min_size: Some(size(px(600.), px(400.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
@@ -490,7 +490,8 @@ impl SettingsWindow {
             )
             .child(section("Thanks to", cx).child(description(
                 "GPUI, gpui-kit and gpui-omarchy for the interface, Omarchy for the look, \
-                 pulldown-cmark for the Markdown, and Lucide for the icons.",
+                 Flexoki by Steph Ango and Tokyo Night by Enkia for the Light and Dark \
+                 colours, pulldown-cmark for the Markdown, and Lucide for the icons.",
                 cx,
             )))
     }
@@ -551,6 +552,7 @@ impl Render for SettingsWindow {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .bg(desktop::content_background(cx))
                     .child(header)
                     .when_some(problem, |column, problem| {
                         column.child(
@@ -730,6 +732,19 @@ mod tests {
         assert_eq!(options.app_id.as_deref(), Some("brouyon-settings"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn it_opens_over_a_blur_whatever_the_mode(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        for mode in [Transparency::Opaque, Transparency::Glassy] {
+            cx.update(|_, cx| cx.global_mut::<Desktop>().transparency = mode);
+            let surface =
+                cx.update(|_, cx| window_options(view.read(cx).config(), cx).window_background);
+            assert_eq!(surface, gpui_kit::WindowBackgroundAppearance::Blurred);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn it_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
