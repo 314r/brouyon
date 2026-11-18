@@ -1070,10 +1070,12 @@ impl Brouyon {
         if narrow && let Some(buttons) = buttons {
             width += buttons - rems(0.75).to_pixels(rem);
         }
+        // A tab's bar reaches past its label, which stays in line with the titles
+        // in the list below: the first tab starts that much before them.
         let tabs = Tabs::new("note-tabs")
             .flex()
             .h_full()
-            .gap(rems(1.))
+            .ml(-rems(TAB_PADDING))
             .child(
                 panel_tab("notes-tab", "Notes", self.notes.len(), !in_trash, true, cx)
                     .on_click(cx.listener(|this, _, window, cx| this.show_notes(window, cx))),
@@ -1840,8 +1842,14 @@ fn is_narrow(window: &Window) -> bool {
     window.viewport_size().width < rems(45.).to_pixels(window.rem_size())
 }
 
+/// How far a tab's bar reaches past its label and count on each side, in rems.
+/// Two tabs side by side keep twice this between their labels.
+const TAB_PADDING: f32 = 0.5;
+
 /// A tab above the list: a small capital label with its count after it, and a
-/// bar in the accent under the current one.
+/// bar in the accent under the current one, wider than the two by the same on
+/// both sides. The bar lies over the tab's bottom edge and takes no room there,
+/// so the label stays in the middle of the header, level with its buttons.
 fn panel_tab(
     id: &'static str,
     label: &'static str,
@@ -1857,10 +1865,10 @@ fn panel_tab(
         .disabled(!enabled)
         .accessibility_label(format!("{label}, {count}"))
         .debug_selector(|| id.into())
+        .relative()
         .h_full()
+        .px(rems(TAB_PADDING))
         .gap(rems(0.375))
-        .border_b_2()
-        .border_color(t.foreground.opacity(0.))
         .text_size(rems(0.6875))
         .font_weight(FontWeight::BOLD)
         .text_color(t.secondary)
@@ -1869,16 +1877,33 @@ fn panel_tab(
         })
         .styles(|styles| {
             styles
-                .selected(|tab| tab.text_color(bright).border_color(accent))
+                .selected(|tab| tab.text_color(bright))
                 .disabled(|tab| tab.opacity(0.45))
         })
-        .child(label.to_uppercase())
+        .child(
+            div()
+                .debug_selector(move || format!("{id}-label"))
+                .child(label.to_uppercase()),
+        )
         .when(count > 0, |tab| {
             tab.child(
                 div()
+                    .debug_selector(move || format!("{id}-count"))
                     .font_weight(FontWeight::NORMAL)
                     .text_color(t.secondary)
                     .child(count.to_string()),
+            )
+        })
+        .when(selected, |tab| {
+            tab.child(
+                div()
+                    .debug_selector(move || format!("{id}-underline"))
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.))
+                    .bg(accent),
             )
         })
 }
@@ -2523,6 +2548,46 @@ pub(crate) mod tests {
         click("notes-tab", cx);
         assert_eq!(selection(&view, cx), Selection::Blank);
         assert!(cx.debug_bounds("empty-trash").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn a_tab_label_is_level_with_the_header_buttons_in_the_middle_of_its_bar(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, _view, cx) = open(cx);
+        type_and_save(cx, "keep me");
+        let tab = cx.debug_bounds("notes-tab").unwrap();
+        let label = cx.debug_bounds("notes-tab-label").unwrap();
+        let button = cx.debug_bounds("new-note").unwrap();
+        assert!(
+            (label.center().y - button.center().y).abs() < px(0.5),
+            "{label:?} isn't level with {button:?}"
+        );
+
+        let count = cx.debug_bounds("notes-tab-count").unwrap();
+        let underline = cx.debug_bounds("notes-tab-underline").unwrap();
+        assert_eq!(
+            (underline.left(), underline.right(), underline.bottom()),
+            (tab.left(), tab.right(), tab.bottom())
+        );
+        let (before, after) = (
+            label.left() - underline.left(),
+            underline.right() - count.right(),
+        );
+        assert!(
+            before > px(4.),
+            "the bar starts {before:?} before the label"
+        );
+        assert_eq!(before, after, "the bar is as long on both sides");
+
+        // The label starts where the titles under it do.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let rem = cx.update(|window, _| window.rem_size());
+            let row = cx.debug_bounds("note-row-0").unwrap();
+            assert_eq!(label.left(), row.left() + rems(ROW_PADDING).to_pixels(rem));
+        }
+        assert!(cx.debug_bounds("trash-tab-underline").is_none());
     }
 
     #[gpui_kit::test]
