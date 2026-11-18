@@ -216,6 +216,18 @@ fn row_colors(t: &Theme, selected: bool, active: bool) -> RowColors {
     }
 }
 
+/// The space between the note's text and the window's right edge, in rems.
+const NOTE_RIGHT: f32 = 1.;
+
+/// The space the editor keeps inside its own edges: it keeps the note off the
+/// window's right edge itself, so that its scrollbar runs along that edge.
+fn note_paddings(window: &Window) -> gpui_kit::Edges<Pixels> {
+    gpui_kit::Edges {
+        right: rems(NOTE_RIGHT).to_pixels(window.rem_size()),
+        ..Default::default()
+    }
+}
+
 /// The space above and below a note's highlight, in rems: half the gap on each side,
 /// and at the list's ends, its own space besides.
 fn row_spacing(row: usize, count: usize) -> (f32, f32) {
@@ -1347,13 +1359,17 @@ impl Brouyon {
                     .flex_1()
                     .min_h_0()
                     .pl(rems(1.5))
-                    .pr(rems(1.))
                     .pt(rems(1.25))
                     .text_size(rems(0.875))
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         editor.update(cx, |state, cx| state.focus(window, cx));
                     })
-                    .child(div().size_full().child(Editor::new(&self.editor)))
+                    .child(
+                        div()
+                            .debug_selector(|| "note-editor".into())
+                            .size_full()
+                            .child(Editor::new(&self.editor)),
+                    )
                     // Above the note, the window's top edge moves it, as a title bar
                     // would on macOS.
                     .when(title_bar::DRAWN, |pane| {
@@ -1704,8 +1720,11 @@ impl Render for Brouyon {
             .place_buttons(rems(BAR_HEIGHT).to_pixels(window.rem_size()), window);
         let t = cx.omarchy().clone();
         let style = markdown::editor_style(&t);
-        self.editor
-            .update(cx, |state, _| state.set_editor_style(style));
+        let paddings = note_paddings(window);
+        self.editor.update(cx, |state, _| {
+            state.set_editor_style(style);
+            state.set_editor_paddings(paddings);
+        });
         let sidebar = self.sidebar(window, cx);
         let editor_pane = self.editor_pane(window, cx);
         let dialog = self.confirm_dialog(cx);
@@ -2265,6 +2284,15 @@ pub(crate) mod tests {
                 window.is_window_active()
             );
         });
+    }
+
+    /// The editor's scrollbar runs along its right edge, which is the window's.
+    #[gpui_kit::test]
+    fn the_note_scrollbar_runs_along_the_window_edge(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open(cx);
+        let width = cx.update(|window, _| window.viewport_size().width);
+        let editor = cx.debug_bounds("note-editor").unwrap();
+        assert_eq!(editor.right(), width);
     }
 
     #[test]
