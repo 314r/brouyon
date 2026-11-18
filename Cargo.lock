@@ -733,6 +733,7 @@ dependencies = [
  "notify 7.0.0",
  "objc2-app-kit 0.3.2",
  "pulldown-cmark",
+ "raw-window-handle",
  "serde",
  "tempfile",
  "toml 0.8.23",

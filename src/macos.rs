@@ -128,6 +128,27 @@ pub fn use_system_accent(cx: &mut App) {
     theme.apply(cx);
 }
 
+/// Whether the window is the one taking the keyboard, as AppKit has it now.
+///
+/// GPUI keeps its own copy, updated a moment after each of AppKit's notices, and
+/// leaving full screen can leave that copy saying the window is in the background
+/// while it's in front. Windows without a native one, such as the tests', fall back
+/// on GPUI's.
+pub fn is_key_window(window: &Window) -> bool {
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return window.is_window_active();
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return window.is_window_active();
+    };
+    // SAFETY: GPUI's Mac window hands out its live NSView, and this runs on the main
+    // thread, where GPUI draws.
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    view.window().is_some_and(|window| window.isKeyWindow())
+}
+
 /// How round macOS 26 makes a window with no toolbar, such as Brouyon's.
 pub const WINDOW_CORNER: f32 = 16.;
 

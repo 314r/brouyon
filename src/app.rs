@@ -1269,7 +1269,11 @@ impl Brouyon {
             ),
             None => ("New note".into(), "".into(), "".into()),
         };
-        let colors = row_colors(&t, selected, window.is_window_active());
+        #[cfg(target_os = "macos")]
+        let active = crate::macos::is_key_window(window);
+        #[cfg(not(target_os = "macos"))]
+        let active = window.is_window_active();
+        let colors = row_colors(&t, selected, active);
         let (above, below) = row_spacing(row, count);
         let row = div()
             .id(("note-row", row))
@@ -2248,6 +2252,19 @@ pub(crate) mod tests {
             ROW_GAP / 2. + LIST_END,
             "and below the last"
         );
+    }
+
+    /// A test window has no AppKit window to ask, so GPUI's answer stands.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn without_appkit_the_window_is_in_front_when_gpui_says_so(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open(cx);
+        cx.update(|window, _| {
+            assert_eq!(
+                crate::macos::is_key_window(window),
+                window.is_window_active()
+            );
+        });
     }
 
     #[test]
