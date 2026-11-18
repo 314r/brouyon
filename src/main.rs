@@ -13,6 +13,7 @@ mod settings;
 mod shortcuts;
 mod store;
 mod title_bar;
+mod watch;
 
 use app::Brouyon;
 use config::Config;
@@ -90,6 +91,7 @@ fn main() {
                 window.set_window_title("Brouyon");
                 let brouyon = cx.new(|cx| {
                     let mut brouyon = Brouyon::new(store, config, window, cx);
+                    brouyon.watch_notes(window, cx);
                     brouyon.settings_problem =
                         startup_problem([config_problem, folder_problem]).map(Into::into);
                     brouyon

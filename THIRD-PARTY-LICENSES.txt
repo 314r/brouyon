@@ -4523,7 +4523,7 @@ VENDORED COMPONENTS
 
 gpui-omarchy folder watcher
 Source: https://github.com/huacnlee/gpui-omarchy
-In this repository: src/desktop.rs
+In this repository: src/watch.rs
 SPDX: MIT
 Selected: MIT
 Texts: 3241d48260a45a03073f60bb25e26e60b62ca14c7ea2d2d24cb9be584eddcd1d

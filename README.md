@@ -50,7 +50,8 @@ Leave it alone for 5 minutes and it puts you on a fresh blank note.
 - 📋 **Copy a note in one click.** As Markdown, or as plain text without the marks, ready to
   paste anywhere.
 - 📄 **Plain files.** Every note is a `.md` file in `~/.local/share/brouyon/`. There is no
-  database, and Brouyon picks up changes you make with other apps.
+  database, and Brouyon picks up changes you make with other apps. Keep the folder in
+  Dropbox and your notes follow you to your other computers.
 
 ---
 
@@ -173,7 +174,7 @@ It runs on macOS too, where it follows the system between light and dark instead
 
 [MIT](LICENSE) © 2026 Pierre Svaert ([314r](https://github.com/314r)). Brouyon also uses the
 components in [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt), each under its own license.
-The folder watcher in `src/desktop.rs` adapts gpui-omarchy's, whose MIT notice is in
+The folder watcher in `src/watch.rs` adapts gpui-omarchy's, whose MIT notice is in
 [LICENSES](LICENSES), and `tools/third-party-licenses` adapts Flea's.
 
 ---

@@ -7,8 +7,9 @@ use crate::{
     lists, markdown,
     settings::{self, SettingsWindow},
     shortcuts::{self, primary},
-    store::{self, Note, NoteId, Store},
+    store::{self, Note, NoteId, Saved, Store},
     title_bar::{self, BAR_HEIGHT, TitleBar},
+    watch::FolderWatcher,
 };
 use chrono::Datelike;
 use gpui_kit::base::{
@@ -37,6 +38,11 @@ use std::{
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 /// How long the strip under the note says that it was copied.
 const COPIED_NOTICE: Duration = Duration::from_secs(2);
+/// How long it says what became of a note that changed elsewhere: long enough to
+/// read while typing.
+const CHANGE_NOTICE: Duration = Duration::from_secs(8);
+/// A sync client brings its changes in a burst, which is read once it ends.
+const FOLDER_SETTLE: Duration = Duration::from_millis(100);
 pub(crate) const KEY_CONTEXT: &str = "Brouyon";
 
 gpui_kit::actions!(
@@ -274,6 +280,28 @@ impl Selection {
     }
 }
 
+/// The open note's file as it was last read or written. A save that finds the file
+/// holding anything else leaves it alone, so that what another program or another
+/// device wrote is never lost. Compared with the file, never with the editor.
+struct Loaded {
+    text: String,
+    modified: SystemTime,
+}
+
+/// What a save did with the editor's text.
+enum Flushed {
+    /// There was nothing to write: no text, or the text the file already holds.
+    Nothing,
+    /// The note's file holds the text. For a blank note, the file is new.
+    Wrote(NoteId),
+    /// The note was emptied and its file removed.
+    Removed,
+    /// The note was emptied, but its file changed elsewhere and was kept.
+    KeptTheirs,
+    /// The file changed elsewhere, so the text went into a new note beside it.
+    KeptBoth(NoteId),
+}
+
 /// A destructive action waiting for an answer in the confirmation dialog.
 #[derive(Clone)]
 enum Confirm {
@@ -302,10 +330,14 @@ pub struct Brouyon {
     dirty: bool,
     /// The last attempt to write that text failed, and `problem` says so.
     save_failed: bool,
-    /// The open file's modified time as last read or written, to notice changes
-    /// made outside the app.
-    loaded_modified: Option<SystemTime>,
+    /// `None` for a blank note and in the Trash, which have no file to save to.
+    loaded: Option<Loaded>,
     problem: Option<SharedString>,
+    /// What became of a note that changed elsewhere, said for a moment.
+    notice: Option<SharedString>,
+    notice_task: Option<Task<()>>,
+    /// Follows the notes folder, once [`Self::watch_notes`] has started it.
+    notes_watch: Option<Task<()>>,
     /// What went wrong with the last setting, shown until one succeeds.
     pub settings_problem: Option<SharedString>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
@@ -362,8 +394,11 @@ impl Brouyon {
             filter_terms: Vec::new(),
             dirty: false,
             save_failed: false,
-            loaded_modified: None,
+            loaded: None,
             problem: None,
+            notice: None,
+            notice_task: None,
+            notes_watch: None,
             settings_problem: None,
             settings_window: None,
             save_task: None,
@@ -421,10 +456,14 @@ impl Brouyon {
                     cx.notify();
                 }
                 self.restart_idle_timer(window, cx);
-                self.save_task = Some(cx.spawn(async move |this, cx| {
+                self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SAVE_DELAY).await;
-                    this.update(cx, |this, cx| {
-                        this.flush(cx);
+                    this.update_in(cx, |this, window, cx| {
+                        // A change that arrived during the typing was left for
+                        // the save to settle, and can be taken now.
+                        if this.flush(cx) {
+                            this.refresh_open_note(window, cx);
+                        }
                     })
                     .ok();
                 }));
@@ -515,27 +554,44 @@ impl Brouyon {
 
     /// Writes any pending text. Returns false if it could not be saved, in which
     /// case the text stays in the editor and callers must not navigate away.
+    ///
+    /// A file that changed elsewhere since it was read is never written over: the
+    /// text goes into a new note beside it, which the editor carries on in.
     fn flush(&mut self, cx: &mut Context<Self>) -> bool {
         self.save_task = None;
         if !self.dirty {
             return true;
         }
         let text = self.editor.read(cx).value();
-        let saved = match (&self.selection, text.trim().is_empty()) {
-            (Selection::Note(id), true) => match self.store.remove(id) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-                _ => Ok(None),
+        let empty = text.trim().is_empty();
+        // A note always has what it was loaded as. Should it not, nothing but a
+        // missing file would match, and the text would go beside the file.
+        let loaded = self.loaded.as_ref().map_or("", |loaded| &loaded.text);
+        let flushed = match &self.selection {
+            // Typed and taken back, such as with undo.
+            Selection::Note(_) if loaded == &*text => Ok(Flushed::Nothing),
+            Selection::Note(id) if empty => {
+                self.store
+                    .remove_unchanged(id, loaded)
+                    .map(|removed| match removed {
+                        true => Flushed::Removed,
+                        false => Flushed::KeptTheirs,
+                    })
+            }
+            Selection::Note(id) => match self.store.save(id, loaded, &text) {
+                Ok(Saved::Written) => Ok(Flushed::Wrote(id.clone())),
+                Ok(Saved::Changed) => self.store.create(&text).map(Flushed::KeptBoth),
+                Err(error) => Err(error),
             },
-            (Selection::Note(id), false) => self.store.write(id, &text).map(|()| Some(id.clone())),
-            (Selection::Blank, false) => self.store.create(&text).map(Some),
-            _ => Ok(None),
+            Selection::Blank if !empty => self.store.create(&text).map(Flushed::Wrote),
+            _ => Ok(Flushed::Nothing),
         };
-        match saved {
-            Ok(saved) => {
+        match flushed {
+            Ok(flushed) => {
                 self.dirty = false;
                 self.save_failed = false;
                 self.problem = None;
-                self.record_save(saved, &text);
+                self.record_save(flushed, &text, cx);
                 cx.notify();
                 true
             }
@@ -548,21 +604,28 @@ impl Brouyon {
         }
     }
 
-    /// Moves a saved note to the top of the list, without rescanning the folder
-    /// on every pause in typing. `None` means the note was emptied and is gone.
-    fn record_save(&mut self, saved: Option<NoteId>, text: &str) {
-        let previous_row = match &self.selection {
-            Selection::Note(id) => {
-                let row = self.notes.iter().position(|note| note.id == *id);
-                self.notes.retain(|note| note.id != *id);
-                row
+    /// Follows a save in the list and in what is open. An ordinary save moves the
+    /// note to the top without rescanning the folder on every pause in typing.
+    fn record_save(&mut self, flushed: Flushed, text: &str, cx: &mut Context<Self>) {
+        let (id, kept_both) = match flushed {
+            Flushed::Nothing => return,
+            Flushed::Removed | Flushed::KeptTheirs => {
+                if matches!(flushed, Flushed::KeptTheirs) {
+                    self.reload_lists();
+                    self.say("Changed elsewhere, so it wasn't removed.", cx);
+                } else if let Selection::Note(id) = &self.selection {
+                    self.notes.retain(|note| note.id != *id);
+                }
+                self.selection = Selection::Blank;
+                self.loaded = None;
+                return;
             }
-            _ => None,
+            Flushed::Wrote(id) => (id, false),
+            Flushed::KeptBoth(id) => (id, true),
         };
-        let Some(id) = saved else {
-            self.selection = Selection::Blank;
-            self.loaded_modified = None;
-            return;
+        let previous_row = match &self.selection {
+            Selection::Note(open) => self.notes.iter().position(|note| note.id == *open),
+            _ => None,
         };
         // A note just begun has to be in the list, whatever was being looked for.
         if self.selection == Selection::Blank {
@@ -572,13 +635,36 @@ impl Brouyon {
             .store
             .modified(&id)
             .unwrap_or_else(|_| SystemTime::now());
-        self.notes
-            .insert(0, Note::new(id.clone(), text.to_owned(), modified));
+        if kept_both {
+            // The other version is a note of its own from now on, to list as it is.
+            self.reload_lists();
+            self.say("Changed elsewhere. Your version is a new note.", cx);
+        } else {
+            self.notes.retain(|note| note.id != id);
+            self.notes
+                .insert(0, Note::new(id.clone(), text.to_owned(), modified));
+        }
         self.selection = Selection::Note(id);
-        self.loaded_modified = Some(modified);
-        if previous_row != Some(0) {
+        self.loaded = Some(Loaded {
+            text: text.to_owned(),
+            modified,
+        });
+        if kept_both || previous_row != Some(0) {
             self.reveal_selection();
         }
+    }
+
+    /// Says `notice` under the note for a moment.
+    fn say(&mut self, notice: &'static str, cx: &mut Context<Self>) {
+        self.notice = Some(notice.into());
+        self.notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHANGE_NOTICE).await;
+            this.update(cx, |this, cx| {
+                this.notice = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn reload_lists(&mut self) {
@@ -612,10 +698,10 @@ impl Brouyon {
 
     /// Shows `selection` in a fresh editor. Assumes pending text is already saved.
     fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
-        let (text, modified) = match &selection {
-            Selection::Blank => (Ok(String::new()), None),
-            Selection::Note(id) => (self.store.read(id), self.store.modified(id).ok()),
-            Selection::Trashed(id) => (self.store.read_trashed(id), None),
+        let text = match &selection {
+            Selection::Blank => Ok(String::new()),
+            Selection::Note(id) => self.store.read(id),
+            Selection::Trashed(id) => self.store.read_trashed(id),
         };
         let text = match text {
             Ok(text) => text,
@@ -636,8 +722,11 @@ impl Brouyon {
         if selection == Selection::Blank || readonly != self.selection.in_trash() {
             self.close_filter();
         }
+        self.loaded = match &selection {
+            Selection::Note(id) => Some(self.loaded_now(id, text.clone())),
+            _ => None,
+        };
         self.selection = selection;
-        self.loaded_modified = modified;
         self.copied = None;
         self.copied_task = None;
         self.copy_menu_open = false;
@@ -687,22 +776,95 @@ impl Brouyon {
         }
     }
 
+    /// `text` as just read from a note's file, with the file's date.
+    fn loaded_now(&self, id: &str, text: String) -> Loaded {
+        let modified = self
+            .store
+            .modified(id)
+            .unwrap_or_else(|_| SystemTime::now());
+        Loaded { text, modified }
+    }
+
+    /// Follows the notes folder, so that what another program or a sync client
+    /// changes shows as it happens, not only when the window next gets focus.
+    /// Without it nothing is lost, since a save never writes over such a change.
+    pub fn watch_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folders = self.store.folders();
+        self.notes_watch = match FolderWatcher::new(&folders, false) {
+            Ok((mut watcher, events)) => Some(cx.spawn_in(window, async move |this, cx| {
+                while events.recv().await.is_ok() {
+                    cx.background_executor().timer(FOLDER_SETTLE).await;
+                    while events.try_recv().is_ok() {}
+                    // The trash may have been replaced, and is read after it is watched.
+                    watcher.arm(&folders);
+                    let synced =
+                        this.update_in(cx, |this, window, cx| this.sync_with_disk(window, cx));
+                    if synced.is_err() {
+                        break;
+                    }
+                }
+            })),
+            Err(error) => {
+                eprintln!("brouyon: can't watch the notes: {error}");
+                None
+            }
+        };
+    }
+
     /// Picks up changes made outside the app, such as a note edited in another
-    /// program. Pending edits win: they are written on the next save.
+    /// program or on another device.
     fn sync_with_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reload_lists();
+        self.refresh_open_note(window, cx);
+        cx.notify();
+    }
+
+    /// Brings the open note up to date with its file, in the editor it is in: this
+    /// can happen at any moment, and must not take the keyboard from wherever it is.
+    /// A note with pending edits is left for its next save, which keeps both.
+    fn refresh_open_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.selection.clone() {
-            Selection::Note(id) if !self.dirty => match self.store.modified(&id) {
-                Ok(modified) if Some(modified) == self.loaded_modified => {}
-                Ok(_) => self.open(Selection::Note(id), window, cx),
-                Err(_) => self.open(Selection::Blank, window, cx),
+            Selection::Note(id) if !self.dirty => match self.store.read(&id) {
+                Ok(text) => {
+                    if self
+                        .loaded
+                        .as_ref()
+                        .is_none_or(|loaded| loaded.text != text)
+                    {
+                        self.show_in_place(&text, window, cx);
+                    }
+                    // The date alone can change, and is shown.
+                    self.loaded = Some(self.loaded_now(&id, text));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.selection = Selection::Blank;
+                    self.loaded = None;
+                    self.show_in_place("", window, cx);
+                }
+                // Not to be read just now, which is no reason to let go of it.
+                Err(_) => {}
             },
-            Selection::Trashed(id) if !self.trash.iter().any(|note| note.id == id) => {
+            // A dialog on screen holds the keyboard, and may be about this note.
+            Selection::Trashed(id)
+                if !self.dialog_is_open() && !self.trash.iter().any(|note| note.id == id) =>
+            {
                 self.show_next_trashed(window, cx);
             }
             _ => {}
         }
-        cx.notify();
+    }
+
+    /// Replaces the editor's text without a new editor, which would take the
+    /// keyboard. The cursor goes back to the start and the undo history is dropped,
+    /// as the text it belonged to is no longer there.
+    fn show_in_place(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |state, cx| {
+            state.set_value(text.to_owned(), window, cx);
+        });
+        self.words = markdown::word_count(text);
+        self.copied = None;
+        self.copied_task = None;
+        self.copy_menu_open = false;
     }
 
     /// Saves before the window goes. The first attempt to leave after a failed save
@@ -797,12 +959,18 @@ impl Brouyon {
 
     fn move_to_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Text typed moments ago may not have a file yet.
+        let before = self.selection.clone();
         if !self.flush(cx) {
             return;
         }
         let Selection::Note(id) = self.selection.clone() else {
             return;
         };
+        // The save found the note changed elsewhere and kept both. Neither is what
+        // was on screen when the key was pressed, so neither goes without a look.
+        if matches!(before, Selection::Note(_)) && before != self.selection {
+            return;
+        }
         match self.store.trash(&id) {
             Ok(_) => {
                 self.reload_lists();
@@ -1048,6 +1216,9 @@ impl Brouyon {
             }
         };
         self.store = store;
+        if self.notes_watch.is_some() {
+            self.watch_notes(window, cx);
+        }
         // A question about a note in the old folder must not act on the new one,
         // where a note can have the same name.
         self.confirm = None;
@@ -1396,14 +1567,18 @@ impl Brouyon {
     ) -> impl IntoElement + use<> {
         let t = cx.omarchy().clone();
         let problem = self.problem.as_ref().or(self.settings_problem.as_ref());
-        let status = match (problem, self.copied, &self.selection, self.loaded_modified) {
+        let status = match (problem, &self.notice, self.copied, &self.selection) {
             (Some(problem), ..) => div().text_color(t.danger).child(problem.clone()),
-            (None, Some(format), ..) => div().child(format!("Copied as {}", format.label())),
-            (None, None, Selection::Note(_), Some(modified)) => div().child(format!(
-                "Saved · {}",
-                format_date(modified, chrono::Local::now())
-            )),
-            (None, None, Selection::Trashed(_), _) => div().child("In the Trash"),
+            (None, Some(notice), ..) => div().child(notice.clone()),
+            (None, None, Some(format), _) => div().child(format!("Copied as {}", format.label())),
+            (None, None, None, Selection::Note(_)) => match &self.loaded {
+                Some(loaded) => div().child(format!(
+                    "Saved · {}",
+                    format_date(loaded.modified, chrono::Local::now())
+                )),
+                None => div(),
+            },
+            (None, None, None, Selection::Trashed(_)) => div().child("In the Trash"),
             _ => div(),
         };
         let actions = div().flex().flex_shrink_0().gap(rems(0.25));
@@ -1992,7 +2167,7 @@ pub(crate) mod tests {
     };
     use std::{
         fs::{self, File},
-        path::Path,
+        path::{Path, PathBuf},
     };
 
     const IDLE: Duration = Duration::from_secs(300);
@@ -3660,6 +3835,310 @@ pub(crate) mod tests {
         refocus(cx);
         assert_eq!(selection(&view, cx), Selection::Blank);
         assert_eq!(titles(&view, cx), ["arrived"]);
+    }
+
+    /// What the watcher does when something in the notes folder changes.
+    fn notice_changes(view: &Entity<Brouyon>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| this.sync_with_disk(window, cx));
+        });
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    /// Types a note, saves it, and returns where its file is.
+    fn saved_note(
+        dir: &Path,
+        view: &Entity<Brouyon>,
+        cx: &mut VisualTestContext,
+        text: &str,
+    ) -> PathBuf {
+        type_and_save(cx, text);
+        let Selection::Note(id) = selection(view, cx) else {
+            panic!("expected a saved note");
+        };
+        dir.join(id)
+    }
+
+    fn notice(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> Option<SharedString> {
+        cx.update(|_, cx| view.read(cx).notice.clone())
+    }
+
+    fn cursor(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, cx| view.read(cx).editor.read(cx).cursor())
+    }
+
+    #[gpui_kit::test]
+    fn a_note_changed_elsewhere_while_typing_is_kept_beside_the_typed_one(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        cx.simulate_input(" and more");
+        fs::write(&path, "theirs").unwrap();
+
+        // Unsaved typing is never replaced by what arrives.
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "mine and more");
+        assert_eq!(note_texts(dir.path()), ["theirs"]);
+
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["mine and more", "theirs"]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
+        assert_eq!(titles(&view, cx), ["mine and more", "theirs"]);
+        assert!(notice(&view, cx).unwrap().contains("new note"));
+
+        // The typing carries on in the new note, where it was.
+        assert_eq!(editor_text(&view, cx), "mine and more");
+        assert_eq!(cursor(&view, cx), "mine and more".len());
+        type_and_save(cx, "!");
+        assert_eq!(note_texts(dir.path()), ["mine and more!", "theirs"]);
+        keys(cx, "ctrl-z");
+        assert_ne!(
+            editor_text(&view, cx),
+            "mine and more!",
+            "the history came along"
+        );
+
+        wait(cx, CHANGE_NOTICE);
+        assert_eq!(notice(&view, cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn typing_into_a_note_left_open_never_overwrites_a_change_made_elsewhere(
+        cx: &mut TestAppContext,
+    ) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        // Nothing looked at the folder since: the editor still shows the old text.
+        fs::write(&path, "theirs").unwrap();
+        type_and_save(cx, " too");
+        assert_eq!(note_texts(dir.path()), ["mine too", "theirs"]);
+    }
+
+    #[gpui_kit::test]
+    fn the_apps_own_save_keeps_the_editor_and_its_history(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        saved_note(dir.path(), &view, cx, "first");
+        notice_changes(&view, cx);
+
+        cx.simulate_input(" second");
+        assert_eq!(editor_text(&view, cx), "first second", "the cursor stayed");
+        keys(cx, "ctrl-z");
+        keys(cx, "ctrl-z");
+        assert_eq!(editor_text(&view, cx), "", "and so did the history");
+        assert_eq!(notice(&view, cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn a_note_only_touched_elsewhere_keeps_its_editor_and_shows_the_new_date(
+        cx: &mut TestAppContext,
+    ) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "first");
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        notice_changes(&view, cx);
+        cx.update(|_, cx| {
+            let loaded = view.read(cx).loaded.as_ref().unwrap();
+            assert_eq!(loaded.modified, SystemTime::UNIX_EPOCH);
+        });
+
+        type_and_save(cx, "!");
+        assert_eq!(note_texts(dir.path()), ["first!"], "the cursor stayed");
+    }
+
+    #[gpui_kit::test]
+    fn a_note_changed_elsewhere_shows_as_it_changes(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        fs::write(&path, "theirs").unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "theirs");
+        assert_eq!(titles(&view, cx), ["theirs"]);
+
+        // What was read is what the next save has to find.
+        type_and_save(cx, "ours, ");
+        assert_eq!(note_texts(dir.path()), ["ours, theirs"]);
+        assert_eq!(notice(&view, cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn typing_taken_back_takes_the_change_made_elsewhere(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        cx.simulate_input("!");
+        fs::write(&path, "theirs").unwrap();
+        keys(cx, "backspace");
+        assert_eq!(editor_text(&view, cx), "mine");
+
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["theirs"], "nothing new to keep");
+        assert_eq!(editor_text(&view, cx), "theirs");
+    }
+
+    #[gpui_kit::test]
+    fn a_note_deleted_elsewhere_while_typing_comes_back(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        fs::remove_file(&path).unwrap();
+        type_and_save(cx, " still");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine still");
+        assert_eq!(note_texts(dir.path()), ["mine still"]);
+    }
+
+    #[gpui_kit::test]
+    fn emptying_a_note_changed_elsewhere_keeps_the_file(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        fs::write(&path, "theirs").unwrap();
+
+        keys(cx, "ctrl-a backspace");
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["theirs"]);
+        assert_eq!(selection(&view, cx), Selection::Blank);
+        assert_eq!(titles(&view, cx), ["theirs"]);
+        assert!(notice(&view, cx).unwrap().contains("wasn't removed"));
+    }
+
+    #[gpui_kit::test]
+    fn a_change_elsewhere_leaves_the_keyboard_in_find(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        find(cx, "th");
+        fs::write(&path, "theirs").unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "theirs");
+
+        cx.simulate_input("eir");
+        cx.run_until_parked();
+        assert!(filter_is_open(&view, cx));
+        assert!(!editor_is_focused(&view, cx));
+        assert_eq!(editor_text(&view, cx), "theirs", "the words went to Find");
+
+        // The same when the open note is gone, which shows a blank one.
+        fs::remove_file(&path).unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(selection(&view, cx), Selection::Blank);
+        cx.simulate_input("s");
+        cx.run_until_parked();
+        assert!(filter_is_open(&view, cx));
+        assert_eq!(editor_text(&view, cx), "");
+        assert!(note_texts(dir.path()).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn moving_to_trash_stops_when_the_note_changed_elsewhere(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        fs::write(&path, "theirs").unwrap();
+        cx.simulate_input(" too");
+
+        keys(cx, "ctrl-shift-backspace");
+        assert_eq!(note_texts(dir.path()), ["mine too", "theirs"]);
+        assert!(trashed_texts(dir.path()).is_empty());
+        assert_eq!(editor_text(&view, cx), "mine too");
+
+        // Asked again, it is the note on screen that goes.
+        keys(cx, "ctrl-shift-backspace");
+        assert_eq!(note_texts(dir.path()), ["theirs"]);
+        assert_eq!(trashed_texts(dir.path()), ["mine too"]);
+    }
+
+    #[gpui_kit::test]
+    fn closing_keeps_both_versions(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        fs::write(&path, "theirs").unwrap();
+        cx.simulate_input(" too");
+        assert!(cx.simulate_close());
+        assert_eq!(note_texts(dir.path()), ["mine too", "theirs"]);
+    }
+
+    #[gpui_kit::test]
+    fn a_note_with_windows_line_endings_is_saved_in_its_own_file(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "one\r\ntwo").unwrap();
+        let (dir, view, cx) = open_with(cx, dir);
+        keys(cx, "alt-down");
+        let shown = editor_text(&view, cx);
+
+        // Whatever the editor makes of them, looking again changes nothing.
+        cx.simulate_input("!");
+        keys(cx, "backspace");
+        notice_changes(&view, cx);
+        wait(cx, SAVE_DELAY);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\r\ntwo");
+        assert_eq!(editor_text(&view, cx), shown);
+
+        type_and_save(cx, "zero ");
+        assert_eq!(note_texts(dir.path()).len(), 1, "no second note");
+        assert!(fs::read_to_string(&path).unwrap().starts_with("zero "));
+    }
+
+    #[gpui_kit::test]
+    fn a_trashed_note_deleted_elsewhere_waits_for_an_open_question(cx: &mut TestAppContext) {
+        let (dir, view, cx, id) = with_one_trashed_note(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.ask_to_delete_forever(id.clone(), window, cx)
+            });
+        });
+        fs::remove_file(dir.path().join(".trash").join(&id)).unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(selection(&view, cx), Selection::Trashed(id));
+        cx.update(|_, cx| assert!(view.read(cx).has_question()));
+    }
+
+    /// The one test here with real file events. They arrive on their own thread, so
+    /// it lets the scheduler be woken from outside and waits in real time.
+    #[gpui_kit::test]
+    fn the_watcher_shows_a_change_while_the_window_stays_in_front(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        cx.update(|window, cx| view.update(cx, |this, cx| this.watch_notes(window, cx)));
+        cx.run_until_parked();
+
+        // As a sync client does: the file arrives beside the notes and moves in.
+        let arriving = dir.path().join(".trash/arriving");
+        fs::write(&arriving, "theirs").unwrap();
+        fs::rename(&arriving, &path).unwrap();
+
+        let until_listed = |cx: &mut VisualTestContext, expected: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while titles(&view, cx) != [expected] {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{expected} never showed"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+                wait(cx, FOLDER_SETTLE);
+            }
+        };
+        until_listed(cx, "theirs");
+        assert_eq!(editor_text(&view, cx), "theirs");
+
+        // The app's own saves go by the watcher too, and change nothing.
+        type_and_save(cx, "ours, ");
+        std::thread::sleep(Duration::from_millis(200));
+        wait(cx, FOLDER_SETTLE);
+        assert_eq!(editor_text(&view, cx), "ours, theirs");
+        assert_eq!(note_texts(dir.path()), ["ours, theirs"]);
+        assert_eq!(cursor(&view, cx), "ours, ".len());
+
+        // Another folder is followed from the moment it is chosen.
+        let other = tempfile::tempdir().unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.set_notes_dir(Some(other.path().into()), window, cx)
+            });
+        });
+        fs::write(other.path().join("there.md"), "there").unwrap();
+        until_listed(cx, "there");
     }
 
     /// Renders every screen to PNGs for a person to review, with no window on the

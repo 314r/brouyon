@@ -11,6 +11,9 @@ use std::{
 
 const TRASH_DIR: &str = ".trash";
 const EXTENSION: &str = "md";
+/// What the name of a file being saved starts with. Nothing else in the folder
+/// does, so whatever watches it can tell a save in progress from a change.
+pub const TEMP_PREFIX: &str = ".~";
 /// More than any list is wide, and a long line costs nothing to keep out of it.
 const PREVIEW_CHARS: usize = 200;
 
@@ -75,6 +78,15 @@ pub fn terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// What became of a save that must not undo a change made elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Saved {
+    /// The file holds the text.
+    Written,
+    /// The file changed since it was read, and was left as it is.
+    Changed,
+}
+
 pub struct Store {
     dir: PathBuf,
     trash: PathBuf,
@@ -86,6 +98,11 @@ impl Store {
         let trash = dir.join(TRASH_DIR);
         fs::create_dir_all(&trash)?;
         Ok(Self { dir, trash })
+    }
+
+    /// The folders to watch for changes: the notes' and the trash's.
+    pub fn folders(&self) -> Vec<PathBuf> {
+        vec![self.dir.clone(), self.trash.clone()]
     }
 
     /// Notes, most recently modified first.
@@ -116,20 +133,52 @@ impl Store {
             &self.dir,
             &chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string(),
         );
-        self.write(&id, text)?;
+        write_atomically(&self.dir, &id, text)?;
         Ok(id)
     }
 
-    /// Atomically replaces a note's contents: a crash mid-save leaves the
-    /// previous version intact.
-    pub fn write(&self, id: &str, text: &str) -> io::Result<()> {
-        write_atomically(&self.dir, id, text)
+    /// Atomically replaces a note's contents with `text`, unless its file holds
+    /// something other than `loaded`, the text this note had when it was last read
+    /// or written. A crash mid-save leaves the previous version intact.
+    ///
+    /// A note deleted elsewhere is written again, because an edit is worth more
+    /// than a deletion. One that already holds `text` is left as it is, date
+    /// included.
+    pub fn save(&self, id: &str, loaded: &str, text: &str) -> io::Result<Saved> {
+        let mut already_there = false;
+        let written = write_if(&self.dir, id, text, || {
+            match fs::read(self.dir.join(id)) {
+                Ok(held) if held == text.as_bytes() => {
+                    already_there = true;
+                    Ok(false)
+                }
+                // Bytes, so a file that is no longer text counts as changed.
+                Ok(held) => Ok(held == loaded.as_bytes()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+                Err(error) => Err(error),
+            }
+        })?;
+        Ok(if written || already_there {
+            Saved::Written
+        } else {
+            Saved::Changed
+        })
     }
 
-    /// Deletes a note's file. Only for notes that have become empty, which have
-    /// nothing worth keeping in the trash.
-    pub fn remove(&self, id: &str) -> io::Result<()> {
-        fs::remove_file(self.dir.join(id))
+    /// Deletes the file of a note that has become empty, which has nothing worth
+    /// keeping in the trash. Returns false, leaving the file, if it holds something
+    /// other than `loaded`: what was written elsewhere wasn't emptied here.
+    pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<bool> {
+        let path = self.dir.join(id);
+        let gone = |result: io::Result<()>| match result {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(true),
+        };
+        match fs::read(&path) {
+            Ok(held) if held == loaded.as_bytes() => gone(fs::remove_file(&path)),
+            Ok(_) => Ok(false),
+            Err(error) => gone(Err(error)),
+        }
     }
 
     pub fn trash(&self, id: &str) -> io::Result<NoteId> {
@@ -164,17 +213,40 @@ impl Store {
 
 /// Replaces `dir/name` all at once, through a temporary file beside it.
 pub fn write_atomically(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    let temp = dir.join(format!(".{name}.tmp"));
+    write_if(dir, name, text, || Ok(true)).map(|_| ())
+}
+
+/// Replaces `dir/name` if `may_replace` agrees, and says whether it did. It is
+/// asked once the text is safely in the temporary file, as late as can be, so that
+/// little time is left for the file to change after the answer.
+///
+/// The temporary file's name starts with `.~`, which Dropbox never syncs, and with
+/// a dot, which keeps it out of the list of notes.
+fn write_if(
+    dir: &Path,
+    name: &str,
+    text: &str,
+    may_replace: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<bool> {
+    let temp = dir.join(temp_name(name));
     let result = (|| {
         let mut file = File::create(&temp)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        fs::rename(&temp, dir.join(name))
+        if !may_replace()? {
+            return Ok(false);
+        }
+        fs::rename(&temp, dir.join(name))?;
+        Ok(true)
     })();
-    if result.is_err() {
+    if !matches!(result, Ok(true)) {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+fn temp_name(name: &str) -> String {
+    format!("{TEMP_PREFIX}{name}.tmp")
 }
 
 /// A file name free in `dir`, so moving or creating a note never overwrites one.
@@ -342,7 +414,10 @@ mod tests {
         assert_eq!(notes[0].title, "Older note");
         assert_eq!(store.list_trash().unwrap().len(), 1);
 
-        store.write(name, "edited").unwrap();
+        assert_eq!(
+            store.save(name, "# Older note\nbody", "edited").unwrap(),
+            Saved::Written
+        );
         assert_eq!(store.read(name).unwrap(), "edited");
         let trashed = store.trash(name).unwrap();
         assert_eq!(trashed, name, "keeps its name through the trash");
@@ -361,29 +436,115 @@ mod tests {
         assert_eq!(store.list().unwrap().len(), 3);
     }
 
-    #[test]
-    fn write_replaces_the_contents_and_leaves_no_temp_file() {
-        let (dir, store) = store();
-        let id = store.create("old").unwrap();
-        store.write(&id, "new").unwrap();
-        assert_eq!(store.read(&id).unwrap(), "new");
-        let entries: Vec<_> = fs::read_dir(dir.path())
+    /// What the folder holds besides the trash, temporary files included.
+    fn files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .filter(|name| name != ".trash")
             .collect();
-        assert_eq!(entries, vec![id]);
+        names.sort();
+        names
     }
 
     #[test]
-    fn a_failed_write_keeps_the_previous_contents_and_cleans_up() {
+    fn saving_replaces_the_contents_and_leaves_no_temp_file() {
         let (dir, store) = store();
         let id = store.create("old").unwrap();
-        // A directory in the way makes the final rename fail.
+        assert_eq!(store.save(&id, "old", "new").unwrap(), Saved::Written);
+        assert_eq!(store.read(&id).unwrap(), "new");
+        assert_eq!(files(dir.path()), [id]);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_previous_contents_and_cleans_up() {
+        let (dir, store) = store();
+        let id = store.create("old").unwrap();
+        // A directory in the way can be neither read nor replaced.
         fs::create_dir(dir.path().join("blocked.md")).unwrap();
-        assert!(store.write("blocked.md", "new").is_err());
+        assert!(store.save("blocked.md", "", "new").is_err());
+        assert!(write_atomically(dir.path(), "blocked.md", "new").is_err());
         assert_eq!(store.read(&id).unwrap(), "old");
-        assert!(!dir.path().join(".blocked.md.tmp").exists());
+        assert_eq!(files(dir.path()), [id, "blocked.md".to_string()]);
+    }
+
+    #[test]
+    fn a_save_in_progress_has_a_name_dropbox_never_syncs() {
+        // Dropbox skips names starting with `.~`, and the list skips those with a dot.
+        assert_eq!(temp_name("note.md"), ".~note.md.tmp");
+    }
+
+    #[test]
+    fn saving_leaves_a_file_changed_elsewhere_alone() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        fs::write(dir.path().join(&id), "changed elsewhere").unwrap();
+
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Changed
+        );
+        assert_eq!(store.read(&id).unwrap(), "changed elsewhere");
+        assert_eq!(files(dir.path()), [id]);
+    }
+
+    #[test]
+    fn saving_a_note_deleted_elsewhere_brings_it_back() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        fs::remove_file(dir.path().join(&id)).unwrap();
+
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Written
+        );
+        assert_eq!(store.read(&id).unwrap(), "typed here");
+    }
+
+    #[test]
+    fn saving_text_the_file_already_holds_keeps_its_date() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        fs::write(dir.path().join(&id), "the same on both").unwrap();
+        set_modified(&dir.path().join(&id), 1000);
+
+        assert_eq!(
+            store.save(&id, "as loaded", "the same on both").unwrap(),
+            Saved::Written
+        );
+        assert_eq!(
+            store.modified(&id).unwrap(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1000)
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_no_longer_text_is_never_overwritten() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        fs::write(dir.path().join(&id), [0xff, 0xfe, 0x00]).unwrap();
+
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Changed
+        );
+        assert_eq!(fs::read(dir.path().join(&id)).unwrap(), [0xff, 0xfe, 0x00]);
+    }
+
+    #[test]
+    fn an_emptied_note_is_removed_unless_it_changed_elsewhere() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        fs::write(dir.path().join(&id), "changed elsewhere").unwrap();
+        assert!(!store.remove_unchanged(&id, "as loaded").unwrap());
+        assert_eq!(store.read(&id).unwrap(), "changed elsewhere");
+
+        assert!(store.remove_unchanged(&id, "changed elsewhere").unwrap());
+        assert!(files(dir.path()).is_empty());
+        assert!(
+            store.remove_unchanged(&id, "changed elsewhere").unwrap(),
+            "one already gone is as gone as was asked"
+        );
     }
 
     #[test]
@@ -401,7 +562,7 @@ mod tests {
     fn list_ignores_dotfiles_other_extensions_folders_and_non_utf8_files() {
         let (dir, store) = store();
         fs::write(dir.path().join(".hidden.md"), "x").unwrap();
-        fs::write(dir.path().join(".note.md.tmp"), "x").unwrap();
+        fs::write(dir.path().join(temp_name("note.md")), "x").unwrap();
         fs::write(dir.path().join("image.png"), "x").unwrap();
         fs::create_dir(dir.path().join("folder.md")).unwrap();
         fs::write(dir.path().join("binary.md"), [0xff, 0xfe, 0x00]).unwrap();

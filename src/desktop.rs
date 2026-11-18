@@ -6,16 +6,16 @@
 //! and the rest only by the tests.
 #![cfg_attr(target_os = "macos", allow(dead_code))]
 
-use crate::config::{home_dir, xdg_dir};
+use crate::{
+    config::{home_dir, xdg_dir},
+    watch::FolderWatcher,
+};
 use gpui_kit::{
     App, Global, Hsla, SharedString, Window, WindowBackgroundAppearance, transparent_black,
 };
 use gpui_omarchy::ActiveTheme;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
-    collections::BTreeMap,
     fs,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime},
@@ -161,7 +161,7 @@ pub fn init(cx: &mut App) {
 pub fn follow(cx: &mut App) {
     let paths = Paths::from_env();
     // Armed before reading, so a change during startup isn't missed.
-    let watcher = DesktopWatcher::new(&paths);
+    let watcher = FolderWatcher::new(&paths.folders(), true);
     let mut fonts = fonts_stamp(&paths);
     let mut desktop = Desktop::read(&paths);
     cx.set_global(desktop.clone());
@@ -181,7 +181,7 @@ pub fn follow(cx: &mut App) {
             let (next_watcher, next_fonts, next) = cx
                 .background_executor()
                 .spawn(async move {
-                    watcher.arm(&paths);
+                    watcher.arm(&paths.folders());
                     let (next, fonts) = reread(&paths, &previous, fonts, monospace_family);
                     (watcher, fonts, next)
                 })
@@ -318,82 +318,10 @@ fn text_scale_from(shell_toml: &str) -> Option<f32> {
     (size > 0. && size.is_finite()).then_some(size / OMARCHY_BASELINE_FONT_SIZE)
 }
 
-/// Watches folders rather than files, so atomic saves and replaced folders survive.
-/// Adapted from gpui-omarchy's palette watcher, which is private to that crate.
-struct DesktopWatcher {
-    watcher: RecommendedWatcher,
-    armed: BTreeMap<PathBuf, Identity>,
-}
-
-/// A folder can be deleted and recreated at the same path before its events are read,
-/// and the old watch then refers to a folder that's gone.
-type Identity = (u64, u64);
-
-impl DesktopWatcher {
-    fn new(paths: &Paths) -> notify::Result<(Self, async_channel::Receiver<()>)> {
-        // One waiting event is enough, because each one reloads everything.
-        let (sender, receiver) = async_channel::bounded(1);
-        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            // Reading a watched file reports an access, which must not cause another read.
-            if !matches!(&event, Ok(event) if event.kind.is_access()) {
-                let _ = sender.try_send(());
-            }
-        })?;
-        let mut watcher = Self {
-            watcher,
-            armed: BTreeMap::new(),
-        };
-        watcher.arm(paths);
-        Ok((watcher, receiver))
-    }
-
-    /// A folder's parent sees it being replaced, and the nearest ancestor of a missing
-    /// one sees it appear, so Omarchy can be set up after Brouyon starts.
-    fn arm(&mut self, paths: &Paths) {
-        let mut wanted = BTreeMap::new();
-        for folder in paths.folders() {
-            let Some(nearest) = folder.ancestors().find(|path| path.is_dir()) else {
-                continue;
-            };
-            add_folder(nearest, &mut wanted);
-            if nearest == folder
-                && let Some(parent) = nearest.parent()
-            {
-                add_folder(parent, &mut wanted);
-            }
-        }
-        self.armed.retain(|path, identity| {
-            let unchanged = wanted.get(path) == Some(identity);
-            if !unchanged {
-                let _ = self.watcher.unwatch(path);
-            }
-            unchanged
-        });
-        for (path, identity) in wanted {
-            if !self.armed.contains_key(&path) {
-                match self.watcher.watch(&path, RecursiveMode::NonRecursive) {
-                    Ok(()) => {
-                        self.armed.insert(path, identity);
-                    }
-                    Err(error) => eprintln!("brouyon: can't watch {}: {error}", path.display()),
-                }
-            }
-        }
-    }
-}
-
-fn add_folder(path: &Path, folders: &mut BTreeMap<PathBuf, Identity>) {
-    if let Ok(path) = fs::canonicalize(path)
-        && let Ok(metadata) = fs::metadata(&path)
-    {
-        folders.insert(path, (metadata.dev(), metadata.ino()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{thread, time::Instant};
+    use crate::watch::testing::{nothing_arrives, settle, wait_for_event};
 
     /// A desktop inside a temporary folder, with Omarchy set up.
     fn omarchy() -> (tempfile::TempDir, Paths) {
@@ -541,25 +469,15 @@ mod tests {
         );
     }
 
-    /// Real file events, which arrive on their own thread, so these wait in real time.
-    fn wait_for_event(events: &async_channel::Receiver<()>) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while events.try_recv().is_err() {
-            assert!(Instant::now() < deadline, "no event arrived");
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Lets a burst of events finish and forgets them, as `follow` does.
-    fn settle(events: &async_channel::Receiver<()>) {
-        thread::sleep(SETTLE);
-        while events.try_recv().is_ok() {}
+    /// Watches the way `follow` does.
+    fn watch(paths: &Paths) -> (FolderWatcher, async_channel::Receiver<()>) {
+        FolderWatcher::new(&paths.folders(), true).unwrap()
     }
 
     #[test]
     fn a_change_of_mode_is_noticed() {
         let (_dir, paths) = omarchy();
-        let (_watcher, events) = DesktopWatcher::new(&paths).unwrap();
+        let (_watcher, events) = watch(&paths);
         touch(paths.toggles.join("window-glassy.lua"));
         wait_for_event(&events);
         assert_eq!(paths.transparency(), Transparency::Glassy);
@@ -569,12 +487,12 @@ mod tests {
     fn a_toggles_folder_created_later_is_noticed() {
         let (_dir, paths) = omarchy();
         fs::remove_dir_all(paths.toggles.parent().unwrap()).unwrap();
-        let (mut watcher, events) = DesktopWatcher::new(&paths).unwrap();
+        let (mut watcher, events) = watch(&paths);
 
         fs::create_dir_all(&paths.toggles).unwrap();
         wait_for_event(&events);
         settle(&events);
-        watcher.arm(&paths);
+        watcher.arm(&paths.folders());
 
         touch(paths.toggles.join("window-glassy.lua"));
         wait_for_event(&events);
@@ -584,7 +502,7 @@ mod tests {
     #[test]
     fn a_replaced_theme_folder_is_still_watched() {
         let (dir, paths) = omarchy();
-        let (mut watcher, events) = DesktopWatcher::new(&paths).unwrap();
+        let (mut watcher, events) = watch(&paths);
 
         // What omarchy-theme-set does: the old folder goes, the next one moves in.
         let next = dir.path().join(".local/state/omarchy/current/next-theme");
@@ -593,7 +511,7 @@ mod tests {
         fs::rename(&next, paths.theme()).unwrap();
         wait_for_event(&events);
         settle(&events);
-        watcher.arm(&paths);
+        watcher.arm(&paths.folders());
 
         fs::write(paths.theme().join("shell.toml"), "[font]\nbase-size = 18").unwrap();
         wait_for_event(&events);
@@ -603,7 +521,7 @@ mod tests {
     #[test]
     fn a_file_renamed_into_place_is_noticed() {
         let (_dir, paths) = omarchy();
-        let (_watcher, events) = DesktopWatcher::new(&paths).unwrap();
+        let (_watcher, events) = watch(&paths);
         let temporary = paths.config.join(".shell.toml.tmp");
         fs::write(&temporary, "[font]\nbase-size = 24").unwrap();
         settle(&events);
@@ -617,11 +535,10 @@ mod tests {
     fn reading_the_settings_does_not_set_off_the_watcher() {
         let (_dir, paths) = omarchy();
         fs::write(paths.config.join("shell.toml"), "[font]\nbase-size = 18").unwrap();
-        let (_watcher, events) = DesktopWatcher::new(&paths).unwrap();
+        let (_watcher, events) = watch(&paths);
         settle(&events);
 
         Desktop::read(&paths);
-        thread::sleep(SETTLE);
-        assert!(events.try_recv().is_err());
+        nothing_arrives(&events);
     }
 }

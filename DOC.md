@@ -76,9 +76,31 @@ modified time.
 The Trash is the `.trash` subfolder. Notes stay there until you delete them. Its tab
 shows what you removed, and the Notes tab takes you back to the note you were on.
 
-You can edit, add or remove these files with anything else. Brouyon picks up the
-changes when its window next gets focus. Files that aren't valid UTF-8 are ignored
-and left untouched. A note that you empty completely has its file removed.
+You can edit, add or remove these files with anything else. Brouyon shows the changes
+as they happen. Files that aren't valid UTF-8 are ignored and left untouched. A note
+that you empty completely has its file removed.
+
+Brouyon never writes over a change it hasn't shown you. If the note you are typing in
+changes elsewhere before your words are saved, they are saved as a new note beside it,
+and you carry on typing there. The strip under the note says so for a moment.
+
+## Syncing with Dropbox
+
+Brouyon has no sync of its own. Its notes are plain files, so Dropbox can carry them
+between your computers:
+
+1. In Settings, choose a folder inside your Dropbox as the notes folder, on each
+   computer. Existing notes don't move by themselves: move the `.md` files and the
+   `.trash` folder there once.
+2. On a Mac, mark that folder **Make available offline** in Dropbox, so the notes are
+   always on the disk.
+
+Notes, edits and the Trash then follow you. A note edited on two computers before Dropbox
+has caught up becomes two notes: Dropbox names the second one a "conflicted copy", and
+Brouyon lists it like any other. Nothing is merged and nothing is lost.
+
+While it saves, Brouyon writes a file whose name starts with `.~` beside the note, which
+Dropbox doesn't sync.
 
 ## Settings
 

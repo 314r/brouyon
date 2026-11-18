@@ -18,9 +18,9 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-app
 # paths = ["assets/icons"]
 
 [[component]]
-# DesktopWatcher in src/desktop.rs is adapted from gpui-omarchy's palette watcher.
+# FolderWatcher in src/watch.rs is adapted from gpui-omarchy's palette watcher.
 name = "gpui-omarchy folder watcher"
 source = "https://github.com/huacnlee/gpui-omarchy"
 spdx = "MIT"
 files = ["LICENSES/MIT-gpui-omarchy.txt"]
-paths = ["src/desktop.rs"]
+paths = ["src/watch.rs"]
