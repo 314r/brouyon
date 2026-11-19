@@ -1,0 +1,46 @@
+#!/bin/sh
+# Builds Brouyon for the iPhone simulator, installs it in the one that is running and
+# opens it there. Needs a Mac with Xcode, and a simulator already booted:
+#
+#     open -a Simulator
+#
+# What the app prints shows here, and Ctrl+C leaves it running. Its notes are its own,
+# inside the simulator.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+if [ "$(uname -s)" != Darwin ]; then
+    echo "bin/ios-sim needs a Mac: the simulator and its tools come with Xcode." >&2
+    exit 1
+fi
+
+# An Apple silicon Mac runs the simulator natively, an Intel one as x86.
+case "$(uname -m)" in
+    arm64) target=aarch64-apple-ios-sim ;;
+    *) target=x86_64-apple-ios ;;
+esac
+
+if ! xcrun simctl list devices booted | grep -q Booted; then
+    echo "No simulator is running. Start one with: open -a Simulator" >&2
+    exit 1
+fi
+
+# GPUI compiles its shaders with it. From Xcode 26 it is a separate download.
+xcrun -sdk iphonesimulator metal --version >/dev/null 2>&1 ||
+    xcodebuild -downloadComponent MetalToolchain
+
+rustup target add "$target"
+IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo build --release --locked --target "$target"
+
+app=target/$target/release/Brouyon.app
+rm -rf "$app"
+mkdir -p "$app"
+cp "target/$target/release/brouyon" "$app/"
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+sed "s/@VERSION@/$version/g" ios/Info.plist >"$app/Info.plist"
+# The simulator takes a signature made here, for no one in particular.
+codesign --force --sign - "$app"
+
+xcrun simctl install booted "$app"
+exec xcrun simctl launch --console-pty --terminate-running-process booted io.github.314r.brouyon

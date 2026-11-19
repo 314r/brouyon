@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What iOS knows of Brouyon.app. bin/ios-sim puts Cargo.toml's version in place of
+     @VERSION@. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Brouyon</string>
+	<key>CFBundleDisplayName</key>
+	<string>Brouyon</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.314r.brouyon</string>
+	<key>CFBundleExecutable</key>
+	<string>brouyon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>MinimumOSVersion</key>
+	<string>15.0</string>
+	<!-- iPhone only. -->
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+	</array>
+	<!-- The notes are plain files in Documents: these two show them in the Files app. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<!-- GPUI's own class. A restored session looks it up here, without
+					     asking the app. -->
+					<key>UISceneDelegateClassName</key>
+					<string>GPUIIosSceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<!-- Without one, iOS shows the app in a small frame with black bars. -->
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

@@ -65,6 +65,15 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
+use gpui_kit::application;
+
+/// gpui-kit leaves the platform of a phone to the app, and Zed's is the only one.
+#[cfg(target_os = "ios")]
+fn application() -> gpui_kit::Application {
+    gpui_kit::Application::with_platform(gpui_ios::current_platform(false))
+}
+
 fn main() {
     let (mut config, config_problem) = Config::load();
     let (store, folder_problem) = match open_store(&mut config) {
@@ -75,34 +84,32 @@ fn main() {
         }
     };
 
-    gpui_kit::application()
-        .with_assets(assets::Assets)
-        .run(move |cx| {
-            gpui_omarchy::init(cx);
-            app::init(cx);
-            #[cfg(target_os = "macos")]
-            macos::init(cx);
-            // What it follows is Omarchy's, which a Mac doesn't have.
-            #[cfg(not(target_os = "macos"))]
-            desktop::follow(cx);
-            app::apply_theme(config.theme, cx);
-            let options = window_options(cx);
-            cx.open_window(options, |window, cx| {
-                window.set_window_title("Brouyon");
-                let brouyon = cx.new(|cx| {
-                    let mut brouyon = Brouyon::new(store, config, window, cx);
-                    brouyon.watch_notes(window, cx);
-                    brouyon.settings_problem =
-                        startup_problem([config_problem, folder_problem]).map(Into::into);
-                    brouyon
-                });
-                #[cfg(target_os = "macos")]
-                macos::follow_appearance(&brouyon, window, cx);
+    application().with_assets(assets::Assets).run(move |cx| {
+        gpui_omarchy::init(cx);
+        app::init(cx);
+        #[cfg(target_os = "macos")]
+        macos::init(cx);
+        // What it follows is Omarchy's, which neither a Mac nor an iPhone has.
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        desktop::follow(cx);
+        app::apply_theme(config.theme, cx);
+        let options = window_options(cx);
+        cx.open_window(options, |window, cx| {
+            window.set_window_title("Brouyon");
+            let brouyon = cx.new(|cx| {
+                let mut brouyon = Brouyon::new(store, config, window, cx);
+                brouyon.watch_notes(window, cx);
+                brouyon.settings_problem =
+                    startup_problem([config_problem, folder_problem]).map(Into::into);
                 brouyon
-            })
-            .expect("open window");
-            cx.activate(true);
-        });
+            });
+            #[cfg(target_os = "macos")]
+            macos::follow_appearance(&brouyon, window, cx);
+            brouyon
+        })
+        .expect("open window");
+        cx.activate(true);
+    });
 }
 
 #[cfg(test)]

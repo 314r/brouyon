@@ -103,8 +103,8 @@ impl Config {
     /// missing or invalid, and what's wrong with an invalid one comes back to be shown.
     pub fn load() -> (Self, Option<String>) {
         let home = home_dir();
-        let path = xdg_dir("XDG_CONFIG_HOME", ".config", &home).join("brouyon/config.toml");
-        let data_home = xdg_dir("XDG_DATA_HOME", ".local/share", &home);
+        let (config_home, data_home) = base_dirs(&home);
+        let path = config_home.join("brouyon/config.toml");
         let (file, problem) = read_file_config(&path);
         (Self::resolve(file, path, &data_home, &home), problem)
     }
@@ -282,6 +282,22 @@ fn invalid(path: &Path, error: impl fmt::Display) -> io::Error {
 pub fn normalized_text_percent(percent: u32) -> u32 {
     let steps = percent.saturating_add(TEXT_PERCENT_STEP / 2) / TEXT_PERCENT_STEP;
     (steps * TEXT_PERCENT_STEP).clamp(MIN_TEXT_PERCENT, MAX_TEXT_PERCENT)
+}
+
+/// Where settings and notes go unless told otherwise. An iPhone app can only write in
+/// its own `Library` and `Documents`, and the second is the one the Files app shows.
+fn base_dirs(home: &Path) -> (PathBuf, PathBuf) {
+    if cfg!(target_os = "ios") {
+        (
+            home.join("Library/Application Support"),
+            home.join("Documents"),
+        )
+    } else {
+        (
+            xdg_dir("XDG_CONFIG_HOME", ".config", home),
+            xdg_dir("XDG_DATA_HOME", ".local/share", home),
+        )
+    }
 }
 
 pub(crate) fn home_dir() -> PathBuf {

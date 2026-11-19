@@ -356,6 +356,10 @@ pub struct Brouyon {
     dialog_focus: gpui_kit::FocusHandle,
     list_scroll: VirtualListScrollHandle,
     title_bar: TitleBar,
+    /// The window shows the list or the note, never both: a phone's has room for one.
+    single_pane: bool,
+    /// Of the two, the list is the one showing.
+    list_shown: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -412,6 +416,8 @@ impl Brouyon {
             dialog_focus: cx.focus_handle(),
             list_scroll: VirtualListScrollHandle::new(),
             title_bar: TitleBar::default(),
+            single_pane: cfg!(target_os = "ios"),
+            list_shown: false,
             _subscriptions: subscriptions,
         };
         this.reload_lists();
@@ -498,7 +504,7 @@ impl Brouyon {
             }
             InputEvent::PressEnter { .. } => {
                 if let Some(first) = self.rows().into_iter().next() {
-                    self.select(first, window, cx);
+                    self.select_from_list(first, window, cx);
                 }
             }
             _ => {}
@@ -694,6 +700,27 @@ impl Brouyon {
             return;
         }
         self.open(selection, window, cx);
+    }
+
+    /// Selects from the list, which gives way to the note where only one shows.
+    fn select_from_list(
+        &mut self,
+        selection: Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select(selection, window, cx);
+        self.list_shown = false;
+        cx.notify();
+    }
+
+    /// The list in place of the note, where only one shows. The note is saved first,
+    /// so the list has it, and the keyboard goes with the note.
+    fn show_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush(cx);
+        self.list_shown = true;
+        window.blur(cx);
+        cx.notify();
     }
 
     /// Shows `selection` in a fresh editor. Assumes pending text is already saved.
@@ -1232,7 +1259,8 @@ impl Brouyon {
         let t = cx.omarchy().clone();
         let in_trash = self.selection.in_trash();
         // Wide enough for a title and its date on one line, unless the editor needs it.
-        let narrow = is_narrow(window);
+        // Alone in the window, it has the whole width.
+        let narrow = !self.single_pane && is_narrow(window);
         let rem = window.rem_size();
         let mut width = rems(if narrow { 11.25 } else { 20. }).to_pixels(rem);
         // On macOS the window's buttons take the header's left, which the narrow
@@ -1268,7 +1296,7 @@ impl Brouyon {
                 .debug_selector(|| "new-note".into())
                 .child(icon(IconName::Plus))
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.select(Selection::Blank, window, cx);
+                    this.select_from_list(Selection::Blank, window, cx);
                 })),
             format!("New note ({})", shortcuts::NEW_NOTE),
         );
@@ -1410,9 +1438,14 @@ impl Brouyon {
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .w(width)
             .h_full()
-            .border_r_1()
+            .map(|list| {
+                if self.single_pane {
+                    list.w_full()
+                } else {
+                    list.w(width).border_r_1()
+                }
+            })
             .border_color(t.divider())
             .child(header)
             .children(filter)
@@ -1477,7 +1510,7 @@ impl Brouyon {
             .when_some(colors.fill, |row, fill| row.bg(fill))
             .when(!selected, |row| row.hover(|row| row.bg(t.hover_fill())))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.select(selection.clone(), window, cx);
+                this.select_from_list(selection.clone(), window, cx);
             }))
             .child(
                 div()
@@ -1650,11 +1683,21 @@ impl Brouyon {
         self.copy_menu_open &= copying;
         // Copying is at one end and the Trash at the other, so that reaching for
         // the first can't land on the second.
+        let to_list = self.single_pane.then(|| {
+            bar_button(
+                button("show-list", "Notes", ButtonVariant::Secondary, cx),
+                window,
+            )
+            .debug_selector(|| "show-list".into())
+            .on_click(cx.listener(|this, _, window, cx| this.show_list(window, cx)))
+        });
+        let listing = to_list.is_some();
         let left = div()
             .flex()
             .items_center()
             .gap(rems(0.75))
             .min_w_0()
+            .children(to_list)
             .children(copy)
             .child(div().truncate().child(status));
         div()
@@ -1666,7 +1709,7 @@ impl Brouyon {
             .h(rems(BAR_HEIGHT))
             // In line with the note's text: the status, or the copy button's icon,
             // which the button's own padding sets in.
-            .pl(rems(if copying { 0.8125 } else { 1.5 }))
+            .pl(rems(if copying || listing { 0.8125 } else { 1.5 }))
             // On a Mac, the button in the corner keeps as far off the side as off the
             // bottom.
             .pr(if cfg!(target_os = "macos") {
@@ -1902,8 +1945,17 @@ impl Render for Brouyon {
             state.set_editor_style(style);
             state.set_editor_paddings(paddings);
         });
+        // Built even when the other is alone, for what each keeps up to date.
         let sidebar = self.sidebar(window, cx);
         let editor_pane = self.editor_pane(window, cx);
+        let (sidebar, editor_pane) = match (self.single_pane, self.list_shown) {
+            (false, _) => (Some(sidebar), Some(editor_pane)),
+            (true, true) => (Some(sidebar), None),
+            (true, false) => (None, Some(editor_pane)),
+        };
+        // What the system covers: its bars, the camera's notch, and the keyboard
+        // while it's up. Nothing on a desktop.
+        let covered = window.insets().effective();
         let dialog = self.confirm_dialog(cx);
         let shortcuts = self.shortcuts_dialog(window, cx);
         let view = cx.entity().downgrade();
@@ -1914,6 +1966,10 @@ impl Render for Brouyon {
             .relative()
             .flex()
             .size_full()
+            .pt(covered.top)
+            .pr(covered.right)
+            .pb(covered.bottom)
+            .pl(covered.left)
             .bg(desktop::root_background(window, cx))
             .text_color(t.foreground)
             .font_family(t.mono_font.clone())
@@ -2004,8 +2060,8 @@ impl Render for Brouyon {
                 .absolute()
                 .size_0(),
             )
-            .child(sidebar)
-            .child(editor_pane)
+            .children(sidebar)
+            .children(editor_pane)
             .children(dialog)
             .children(shortcuts)
     }
@@ -2493,6 +2549,61 @@ pub(crate) mod tests {
         let width = cx.update(|window, _| window.viewport_size().width);
         let editor = cx.debug_bounds("note-editor").unwrap();
         assert_eq!(editor.right(), width);
+    }
+
+    fn single_pane(view: &Entity<Brouyon>, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            view.update(cx, |this, cx| {
+                this.single_pane = true;
+                cx.notify();
+            });
+        });
+        draw(cx);
+    }
+
+    /// As on a phone: the note has the window to itself, the list takes its place
+    /// when asked for, and a note chosen there takes it back.
+    #[gpui_kit::test]
+    fn a_single_pane_shows_the_note_or_the_list(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        type_and_save(cx, "first");
+        keys(cx, "ctrl-n");
+        single_pane(&view, cx);
+        assert!(cx.debug_bounds("note-editor").is_some());
+        assert!(cx.debug_bounds("new-note").is_none());
+
+        click("show-list", cx);
+        assert!(cx.debug_bounds("note-editor").is_none());
+        let width = cx.update(|window, _| window.viewport_size().width);
+        let row = cx.debug_bounds("note-row-0").unwrap();
+        assert_eq!((row.left(), row.right()), (px(0.), width));
+        // The list is as wide as the window, so the button has room, however narrow.
+        assert!(cx.debug_bounds("find-note").is_some());
+
+        // The first row is the blank note the list was left from.
+        click("note-row-1", cx);
+        assert!(cx.debug_bounds("note-row-0").is_none());
+        assert_eq!(editor_text(&view, cx), "first");
+        let editor = cx.update(|_, cx| view.read(cx).editor.focus_handle(cx));
+        cx.update(|window, _| assert!(editor.is_focused(window)));
+    }
+
+    /// Going to the list saves the note, so that the list has it, and takes the
+    /// focus, which on a phone puts the keyboard away.
+    #[gpui_kit::test]
+    fn going_to_the_list_saves_the_note(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        single_pane(&view, cx);
+        cx.simulate_input("just typed");
+        click("show-list", cx);
+        assert_eq!(note_texts(dir.path()), ["just typed"]);
+        assert_eq!(titles(&view, cx), ["just typed"]);
+        let editor = cx.update(|_, cx| view.read(cx).editor.focus_handle(cx));
+        cx.update(|window, _| assert!(!editor.is_focused(window)));
+
+        click("new-note", cx);
+        assert_eq!(selection(&view, cx), Selection::Blank);
+        assert!(cx.debug_bounds("note-editor").is_some());
     }
 
     #[test]

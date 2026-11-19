@@ -4,7 +4,7 @@
 //!
 //! A Mac has no Omarchy to follow, so there only the solid, unscaled default is used,
 //! and the rest only by the tests.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
 
 use crate::{
     config::{home_dir, xdg_dir},
@@ -87,7 +87,9 @@ impl Default for Desktop {
         Self {
             transparency: Transparency::Opaque,
             text_scale: 1.,
-            font: None,
+            // gpui-omarchy asks fontconfig, which an iPhone doesn't have, and then
+            // names a font that isn't on one either.
+            font: cfg!(target_os = "ios").then(|| "Menlo".into()),
         }
     }
 }

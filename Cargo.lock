@@ -729,6 +729,7 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "gpui-omarchy",
+ "gpui-pre-ios",
  "image",
  "notify 7.0.0",
  "objc2-app-kit 0.3.2",
