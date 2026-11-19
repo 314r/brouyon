@@ -1529,7 +1529,13 @@ impl Brouyon {
             .pr(rems(0.5))
             .border_t_1()
             .border_color(t.divider())
-            .child(settings)
+            // Settings are a window of their own, and an iPhone gives an app one.
+            // The bar still keeps Empty Trash on its right.
+            .child(if cfg!(target_os = "ios") {
+                div().into_any_element()
+            } else {
+                settings.into_any_element()
+            })
             .children(empty_trash);
 
         div()
