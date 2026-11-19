@@ -2675,7 +2675,7 @@ dependencies = [
 [[package]]
 name = "gpui-omarchy"
 version = "0.2.1"
-source = "git+https://github.com/314r/gpui-omarchy?rev=efeb5bea07bee8d869e20d3411c66a9974c5d1c2#efeb5bea07bee8d869e20d3411c66a9974c5d1c2"
+source = "git+https://github.com/314r/gpui-omarchy?rev=763206d38c04219ba2818a306a7528c23f1a9886#763206d38c04219ba2818a306a7528c23f1a9886"
 dependencies = [
  "async-channel",
  "chrono",

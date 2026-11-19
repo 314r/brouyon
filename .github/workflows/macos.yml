@@ -1,4 +1,5 @@
-# Builds and tests Brouyon on macOS, whose code Linux never compiles.
+# Builds and tests Brouyon on macOS, whose code Linux never compiles, and builds it
+# for an iPhone, which only a Mac can.
 name: macOS
 
 on:
@@ -16,3 +17,17 @@ jobs:
       # The Rust that mise.toml pins.
       - uses: jdx/mise-action@v2
       - run: cargo test --locked
+
+  # For the simulator, so that it links too. Nothing here runs it.
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Metal compiler
+        run: xcrun -sdk iphonesimulator metal --version || xcodebuild -downloadComponent MetalToolchain
+      - uses: jdx/mise-action@v2
+      # For the Rust that mise.toml pins, whichever one rustup calls its default.
+      - run: rustup target add aarch64-apple-ios-sim --toolchain "$(rustc --version | cut -d' ' -f2)"
+      - run: cargo build --locked --target aarch64-apple-ios-sim
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"

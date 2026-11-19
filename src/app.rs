@@ -14,7 +14,7 @@ use crate::{
 use chrono::Datelike;
 use gpui_kit::base::{
     Tab, Tabs, VirtualListScrollHandle,
-    input::{Editor, EditorState, InputEvent, InputState, Redo},
+    input::{EditorState, InputEvent, InputState, Redo},
 };
 use gpui_kit::{
     Anchor, App, ClipboardItem, Context, DispatchPhase, Entity, Focusable, FontWeight, IntoElement,
@@ -70,6 +70,8 @@ gpui_kit::actions!(
 pub fn init(cx: &mut App) {
     use gpui_kit::KeyBinding;
     desktop::init(cx);
+    #[cfg(any(target_os = "ios", feature = "touch-editor"))]
+    touch_editor::init(cx);
     // Only reached when no window is there to answer, which each does by saving first.
     cx.on_action(|_: &Quit, cx| cx.quit());
     // Scoped to the app's context: a binding with no context would outrank the
@@ -108,6 +110,102 @@ pub fn init(cx: &mut App) {
     use_mono_font(cx);
     cx.observe_global::<Theme>(use_mono_font).detach();
     cx.observe_global::<Desktop>(use_mono_font).detach();
+}
+
+/// The note's editor: gpui-base's, bare, which the pane around it dresses.
+#[cfg(not(any(target_os = "ios", feature = "touch-editor")))]
+fn note_editor(
+    editor: &Entity<EditorState>,
+    _readonly: bool,
+    _window: &Window,
+    _cx: &App,
+) -> impl IntoElement + use<> {
+    gpui_kit::base::input::Editor::new(editor)
+}
+
+#[cfg(any(target_os = "ios", feature = "touch-editor"))]
+use touch_editor::note_editor;
+
+/// The note's editor where fingers select its text. gpui-base follows a long press
+/// and the drag of a handle, and leaves drawing the handles and the menu to a styled
+/// layer. gpui-omarchy draws neither, and gpui-kit's own components draw both, so
+/// here the editor is theirs, dressed down to look like the bare one.
+#[cfg(any(target_os = "ios", feature = "touch-editor"))]
+mod touch_editor {
+    use super::*;
+    use gpui_kit::component::{self, Sizable, Size, input};
+
+    /// After gpui-omarchy's own `init`, and before a theme is applied: starting the
+    /// components sets gpui-base's theme, which every palette of ours sets again.
+    pub fn init(cx: &mut App) {
+        component::init(cx);
+        match_theme(cx);
+        cx.observe_global::<Theme>(match_theme).detach();
+    }
+
+    /// The components have a theme of their own. Of it only the handles and the
+    /// menu show, and they take our palette's colours.
+    fn match_theme(cx: &mut App) {
+        let t = cx.omarchy().clone();
+        let theme = component::Theme::global_mut(cx);
+        theme.selection = t.selection;
+        theme.caret = t.foreground;
+        theme.popover = t.background;
+        theme.popover_foreground = t.foreground;
+        theme.accent = t.hover_fill();
+        theme.accent_foreground = t.foreground;
+        theme.border = t.divider();
+    }
+
+    /// GPUI's own leading, which the bare editor keeps and the components' doesn't.
+    const LINE_HEIGHT: f32 = 1.618034;
+
+    pub fn note_editor(
+        editor: &Entity<EditorState>,
+        readonly: bool,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let style = markdown::editor_style(cx.omarchy());
+        let state = editor.clone();
+        // The components' editor pads its text by its size, and the smallest one
+        // leaves this much on each side and none above. Moving the editor left by
+        // as much keeps the text in line with the bar under it, and takes the same
+        // off its right, where the note keeps the room `note_paddings` asks for.
+        let inset = Size::XSmall.input_px();
+        let right = (note_paddings(window).right - inset * 2.).max(px(0.));
+        div()
+            .size_full()
+            .pr(right)
+            .ml(-inset)
+            // That editor also gives the note its own colours as it is built, over
+            // the ones `render` set, and the Markdown styles go with them. It is
+            // built while the window is laid out, and this runs once that is done
+            // and before the note is drawn, so ours are the ones that show.
+            .child(
+                canvas(
+                    move |_, _, cx| {
+                        state.update(cx, |state, _| state.set_editor_style(style));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0(),
+            )
+            .child(
+                input::Editor::new(editor)
+                    .with_size(Size::XSmall)
+                    .appearance(false)
+                    .bordered(false)
+                    // Set on the editor each time it's drawn, over what it was built
+                    // with, so the Trash has to say so here too.
+                    .readonly(readonly)
+                    .size_full()
+                    .font_family(cx.omarchy().mono_font.clone())
+                    .text_size(rems(0.875))
+                    .line_height(relative(LINE_HEIGHT)),
+            )
+    }
 }
 
 /// gpui-omarchy looks the monospace font up only once, so a font changed since then
@@ -1574,7 +1672,12 @@ impl Brouyon {
                         div()
                             .debug_selector(|| "note-editor".into())
                             .size_full()
-                            .child(Editor::new(&self.editor)),
+                            .child(note_editor(
+                                &self.editor,
+                                self.selection.in_trash(),
+                                window,
+                                cx,
+                            )),
                     )
                     // Above the note, the window's top edge moves it, as a title bar
                     // would on macOS.
@@ -2574,9 +2677,13 @@ pub(crate) mod tests {
 
         click("show-list", cx);
         assert!(cx.debug_bounds("note-editor").is_none());
-        let width = cx.update(|window, _| window.viewport_size().width);
+        // As wide as the window, less what a Mac sets each row in from the sides.
+        let (width, inset) = cx.update(|window, _| {
+            let inset = rems(ROW_INSET).to_pixels(window.rem_size());
+            (window.viewport_size().width, inset)
+        });
         let row = cx.debug_bounds("note-row-0").unwrap();
-        assert_eq!((row.left(), row.right()), (px(0.), width));
+        assert_eq!((row.left(), row.right()), (inset, width - inset));
         // The list is as wide as the window, so the button has room, however narrow.
         assert!(cx.debug_bounds("find-note").is_some());
 

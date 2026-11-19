@@ -5,4 +5,6 @@ set -eu
 
 cd "$(dirname "$0")/.."
 cargo test "$@"
+# Again with the editor an iPhone gets, which a desktop can draw too.
+cargo test --features touch-editor "$@"
 python3 tools/third-party-licenses --check
