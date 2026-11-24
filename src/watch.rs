@@ -5,6 +5,7 @@ use std::{
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 /// Adapted from gpui-omarchy's palette watcher, which is private to that crate.
@@ -17,8 +18,9 @@ pub struct FolderWatcher {
 }
 
 /// A folder can be deleted and recreated at the same path before its events are read,
-/// and the old watch then refers to a folder that's gone.
-type Identity = (u64, u64);
+/// and the old watch then refers to a folder that's gone. ext4 gives the new one the inode
+/// of the old, so the time it was made tells them apart.
+type Identity = (u64, u64, Option<SystemTime>);
 
 impl FolderWatcher {
     /// With `parents`, a folder's parent is watched too, which sees it being
@@ -104,7 +106,10 @@ fn add_folder(path: &Path, folders: &mut BTreeMap<PathBuf, Identity>) {
     if let Ok(path) = fs::canonicalize(path)
         && let Ok(metadata) = fs::metadata(&path)
     {
-        folders.insert(path, (metadata.dev(), metadata.ino()));
+        folders.insert(
+            path,
+            (metadata.dev(), metadata.ino(), metadata.created().ok()),
+        );
     }
 }
 
