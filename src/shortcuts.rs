@@ -1,12 +1,6 @@
-//! The keys of Brouyon's shortcuts on each system, and how they are written there:
-//! with Ctrl on Linux, and with ⌘ on macOS, where the editor already takes it for
-//! undo, copy and paste.
-
 use crate::look::MAC;
 
-/// A binding on the key that holds shortcuts on this system: `primary!("n")` is
-/// `ctrl-n` on Linux and `cmd-n` on macOS. A macro, because `KeyBinding::new` wants
-/// a literal, and refuses GPUI's own `secondary-`.
+/// A macro, because `KeyBinding::new` wants a literal, and refuses GPUI's own `secondary-`.
 macro_rules! primary {
     ($keys:literal) => {
         if crate::look::MAC {
@@ -19,7 +13,6 @@ macro_rules! primary {
 
 pub(crate) use primary;
 
-/// On a Mac, as macOS's own menus write them, with the modifiers in their usual order.
 const fn written(on_linux: &'static str, on_mac: &'static str) -> &'static str {
     if MAC { on_mac } else { on_linux }
 }
@@ -38,7 +31,6 @@ pub const TEXT_SIZE: &str = written("Ctrl+Plus, Ctrl+Minus, Ctrl+0", "⌘+, ⌘�
 pub const SHORTCUTS: &str = written("F1", "⌘/ or F1");
 pub const QUIT: &str = written("Ctrl+Q", "⌘Q");
 
-/// What the shortcuts overlay lists, in the order of the README's table.
 pub const ALL: [(&str, &str); 13] = [
     (NEW_NOTE, "New note"),
     (FIND_NOTE, "Find a note"),
@@ -54,3 +46,33 @@ pub const ALL: [(&str, &str); 13] = [
     (SHORTCUTS, "These shortcuts"),
     (QUIT, "Quit"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_documentation_lists_the_same_keys() {
+        if MAC {
+            return;
+        }
+        let table = include_str!("../DOC.md")
+            .split_once("| Key | Action |")
+            .and_then(|(_, rest)| rest.split_once("\n\n"))
+            .expect("DOC.md has the table")
+            .0;
+        let documented: Vec<_> = table
+            .lines()
+            .filter(|row| row.starts_with("| `"))
+            .map(|row| row.split(" | ").next().unwrap().replace(['|', '`'], ""))
+            .collect();
+        for (number, (keys, action)) in ALL.iter().enumerate() {
+            let row = documented.get(number).map_or("", |row| row.trim());
+            assert!(
+                row.starts_with(keys),
+                "{action}: {keys} in the window, {row} in DOC.md"
+            );
+        }
+        assert_eq!(documented.len(), ALL.len());
+    }
+}

@@ -5,10 +5,10 @@ Run: verify/check --drift
 Says: src/store.rs: restore changed
 
 diff --git i/src/store.rs w/src/store.rs
-index 5a6aacd..e889b18 100644
+index 19b6fe2..90fd990 100644
 --- i/src/store.rs
 +++ w/src/store.rs
-@@ -177,7 +177,12 @@ impl Store {
+@@ -160,7 +160,12 @@ impl Store {
      }
  
      pub fn restore(&self, id: &str) -> io::Result<NoteId> {
@@ -21,4 +21,4 @@ index 5a6aacd..e889b18 100644
 +        Ok(target)
      }
  
-     /// Permanently deletes one trashed note. Returns false, leaving the file, if it
+     pub fn purge(&self, id: &str, shown: &str) -> io::Result<Removed> {

@@ -1,10 +1,3 @@
-//! What Brouyon follows from the desktop besides the palette and the corners, which
-//! gpui-omarchy already follows: Omarchy's window transparency, the text size and the
-//! monospace font. All of it applies live, and Brouyon only ever reads it.
-//!
-//! A Mac has no Omarchy to follow, so there only the solid, unscaled default is used,
-//! and the rest only by the tests.
-
 use crate::{
     checked::TextScale,
     config::{home_dir, xdg_dir},
@@ -23,7 +16,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// The size Omarchy's shell metrics are defined against.
 const OMARCHY_BASELINE_FONT_SIZE: f32 = 12.;
 /// What `o.transparent_window` gives a window, when it's active and when it's not.
 const WINDOW_OPACITY: (f32, f32) = (0.985, 0.96);
@@ -33,8 +25,6 @@ const GLASS_OPACITY: f32 = 0.65;
 /// change empties a file before writing it, so reading waits for such a burst to end.
 const SETTLE: Duration = Duration::from_millis(100);
 
-/// The choice under Omarchy's Appearance > Windows > Window Opacity.
-///
 /// Omarchy leaves the effect to each app: its opacity rules only cover windows that
 /// opt in, and glassy terminals paint their own see-through background, which keeps
 /// their text crisp. Brouyon paints its background the same way.
@@ -73,7 +63,6 @@ impl Transparency {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Desktop {
     pub transparency: Transparency,
-    /// How much larger than Omarchy's baseline the user set their desktop text.
     pub text_scale: TextScale,
     /// The monospace font, once it has changed since launch. Until then
     /// gpui-omarchy's choice is current, and it only looks once per process.
@@ -83,8 +72,6 @@ pub struct Desktop {
 impl Global for Desktop {}
 
 impl Default for Desktop {
-    /// Solid and unscaled, so nothing depends on the real desktop until
-    /// [`follow`] is called, which only `main` does.
     fn default() -> Self {
         Self {
             transparency: Transparency::Opaque,
@@ -104,8 +91,6 @@ impl Desktop {
     }
 }
 
-/// What the windows show behind their root: the transparency mode's surface, or on a
-/// Mac, the blur its sidebars are tinted over.
 pub fn surface(cx: &App) -> WindowBackgroundAppearance {
     if MAC {
         WindowBackgroundAppearance::Blurred
@@ -114,10 +99,6 @@ pub fn surface(cx: &App) -> WindowBackgroundAppearance {
     }
 }
 
-/// The background of a window's root. Only the root is see-through: dialogs, popups
-/// and tooltips paint the theme's solid background, and should keep doing so. On a
-/// Mac, what the root shows is the sidebar, and [`content_background`] keeps the
-/// rest solid.
 pub fn root_background(window: &Window, cx: &App) -> Hsla {
     let alpha = if MAC {
         macos::sidebar_opacity(cx.omarchy())
@@ -128,8 +109,6 @@ pub fn root_background(window: &Window, cx: &App) -> Hsla {
     cx.omarchy().background.opacity(alpha)
 }
 
-/// The background of what sits beside a window's sidebar: none, so the root's shows,
-/// except on a Mac, where only the sidebar is see-through.
 pub fn content_background(cx: &App) -> Hsla {
     if MAC {
         cx.omarchy().background
@@ -138,7 +117,6 @@ pub fn content_background(cx: &App) -> Hsla {
     }
 }
 
-/// Keeps every window's surface in step with the desktop. Needs no real desktop.
 pub fn init(cx: &mut App) {
     cx.default_global::<Desktop>();
     cx.observe_global::<Desktop>(|cx| {
@@ -155,15 +133,13 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// Reads the desktop's settings and keeps following them.
 pub fn follow(cx: &mut App) {
     let paths = Paths::from_env();
-    // Armed before reading, so a change during startup isn't missed.
-    let watcher = FolderWatcher::new(&paths.folders(), true);
+    let watcher = FolderWatcher::new(paths.folders().to_vec(), true);
     let mut fonts = fonts_stamp(&paths);
     let mut desktop = Desktop::read(&paths);
     cx.set_global(desktop.clone());
-    let (mut watcher, events) = match watcher {
+    let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
             eprintln!("brouyon: can't watch the desktop's settings: {error}");
@@ -171,20 +147,16 @@ pub fn follow(cx: &mut App) {
         }
     };
     cx.spawn(async move |cx| {
-        while events.recv().await.is_ok() {
-            cx.background_executor().timer(SETTLE).await;
-            while events.try_recv().is_ok() {}
+        loop {
+            watcher
+                .changed(|| cx.background_executor().timer(SETTLE))
+                .await;
             let paths = paths.clone();
             let previous = desktop.clone();
-            let (next_watcher, next_fonts, next) = cx
+            let (next, next_fonts) = cx
                 .background_executor()
-                .spawn(async move {
-                    watcher.arm(&paths.folders());
-                    let (next, fonts) = reread(&paths, &previous, fonts, monospace_family);
-                    (watcher, fonts, next)
-                })
+                .spawn(async move { reread(&paths, &previous, fonts, monospace_family) })
                 .await;
-            watcher = next_watcher;
             fonts = next_fonts;
             if next != desktop {
                 desktop = next.clone();
@@ -195,8 +167,6 @@ pub fn follow(cx: &mut App) {
     .detach();
 }
 
-/// Reads everything again. The font is only looked up when its file has changed,
-/// because that starts a process and these folders see other changes too.
 fn reread(
     paths: &Paths,
     previous: &Desktop,
@@ -233,7 +203,6 @@ fn monospace_family() -> Option<SharedString> {
     first_family(&String::from_utf8(output.stdout).ok()?)
 }
 
-/// fc-match lists aliases, such as "JetBrainsMono Nerd Font,JetBrainsMono NF".
 fn first_family(families: &str) -> Option<SharedString> {
     let family = families.lines().next()?.split(',').next()?.trim();
     (!family.is_empty()).then(|| family.to_owned().into())
@@ -319,9 +288,8 @@ fn text_scale_from(shell_toml: &str) -> Option<TextScale> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::watch::testing::{nothing_arrives, settle, wait_for_event};
+    use crate::watch::testing::{events, nothing_arrives, settle, take_change, wait_for_event};
 
-    /// A desktop inside a temporary folder, with Omarchy set up.
     fn omarchy() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path(), &dir.path().join(".local/state"));
@@ -479,9 +447,10 @@ mod tests {
         );
     }
 
-    /// Watches the way `follow` does.
     fn watch(paths: &Paths) -> (FolderWatcher, async_channel::Receiver<()>) {
-        FolderWatcher::new(&paths.folders(), true).unwrap()
+        let watcher = FolderWatcher::new(paths.folders().to_vec(), true).unwrap();
+        let events = events(&watcher);
+        (watcher, events)
     }
 
     #[test]
@@ -500,9 +469,7 @@ mod tests {
         let (mut watcher, events) = watch(&paths);
 
         fs::create_dir_all(&paths.toggles).unwrap();
-        wait_for_event(&events);
-        settle(&events);
-        watcher.arm(&paths.folders());
+        take_change(&mut watcher);
 
         touch(paths.toggles.join("window-glassy.lua"));
         wait_for_event(&events);
@@ -514,14 +481,11 @@ mod tests {
         let (dir, paths) = omarchy();
         let (mut watcher, events) = watch(&paths);
 
-        // What omarchy-theme-set does: the old folder goes, the next one moves in.
         let next = dir.path().join(".local/state/omarchy/current/next-theme");
         fs::create_dir_all(&next).unwrap();
         fs::remove_dir_all(paths.theme()).unwrap();
         fs::rename(&next, paths.theme()).unwrap();
-        wait_for_event(&events);
-        settle(&events);
-        watcher.arm(&paths.folders());
+        take_change(&mut watcher);
 
         fs::write(paths.theme().join("shell.toml"), "[font]\nbase-size = 18").unwrap();
         wait_for_event(&events);

@@ -1,8 +1,3 @@
-//! What a Mac expects of an app besides its window: a menu bar, the keys that hide
-//! and minimise, a theme that follows the system's light or dark appearance, and
-//! quitting once the window is closed. It compiles everywhere, with something to stand
-//! in for what only a Mac can answer.
-
 use crate::{
     app::{
         self, Brouyon, CloseWindow, CopyNote, DecreaseTextSize, FindNote, IncreaseTextSize,
@@ -31,22 +26,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
-        // Settings has its own, in its own context.
         KeyBinding::new("cmd-w", CloseWindow, Some(app::KEY_CONTEXT)),
     ]);
     // Each item shows the key bound to its action, so it's set once the keys are.
     cx.set_menus(menus());
 
-    // A Mac app keeps running when its windows are closed, but Brouyon is its window:
-    // without one, clicking its icon in the Dock would do nothing.
+    // A Mac app keeps running when its windows are closed, and its icon in the Dock would
+    // then do nothing.
     cx.on_window_closed(|cx, _| kept::quit_without_windows(cx))
         .detach();
 }
 
-/// The theme that follows the system, which on a Mac is its light or dark appearance,
-/// changes with it. Every theme takes the system's accent, which is looked at again
-/// whenever the window comes to the front: macOS doesn't tell the window when it
-/// changes.
 pub fn follow_appearance(brouyon: &Entity<Brouyon>, window: &mut Window, cx: &mut App) {
     let weak = brouyon.downgrade();
     window
@@ -71,20 +61,12 @@ pub fn follow_appearance(brouyon: &Entity<Brouyon>, window: &mut Window, cx: &mu
     });
 }
 
-/// What macOS 26 rounds: 4 points for small marks such as a checkbox, 8 for
-/// controls and the surfaces gpui-omarchy draws with them (buttons, fields, menus,
-/// dialogs, tooltips), and capsules for switches and scrollbar thumbs. gpui-omarchy
-/// only follows Hyprland's rounding, so without it everything would stay square.
+/// What macOS 26 rounds: small marks such as a checkbox, then controls and the surfaces
+/// drawn with them. gpui-omarchy only follows Hyprland's rounding.
 pub const CORNERS: (f32, f32) = (4., 8.);
 
-/// How opaque the sidebar's tint is over the blur behind the window, which lets the
-/// desktop show through it as it does through a Mac app's sidebar. The note beside
-/// it stays solid.
-///
 /// GPUI takes out the tint macOS gives its own blur, so what's behind the window
-/// shows through as it is. A dark theme needs more of its own colour on top: a
-/// bright window behind would otherwise turn the sidebar a muddy grey and wash out
-/// its text. With these, the text keeps at least 4.5:1 against a white window behind.
+/// shows through as it is.
 pub fn sidebar_opacity(theme: &Theme) -> f32 {
     match theme.appearance {
         ThemeAppearance::Light => 0.85,
@@ -92,9 +74,6 @@ pub fn sidebar_opacity(theme: &Theme) -> f32 {
     }
 }
 
-/// The accent colour chosen under System Settings > Appearance, in place of the
-/// theme's, for whatever the theme marks with it. None if macOS doesn't give one in
-/// sRGB.
 #[cfg(target_os = "macos")]
 pub fn system_accent() -> Option<Hsla> {
     use objc2_app_kit::{NSColor, NSColorSpace};
@@ -111,7 +90,6 @@ pub fn system_accent() -> Option<Hsla> {
     )
 }
 
-/// The blue that a Mac starts with.
 #[cfg(not(target_os = "macos"))]
 pub fn system_accent() -> Option<Hsla> {
     let blue = Rgba {
@@ -123,8 +101,6 @@ pub fn system_accent() -> Option<Hsla> {
     Some(blue.into())
 }
 
-/// Paints the theme just applied with the system's accent. The text on it is white,
-/// as on a Mac's own accent-coloured controls.
 pub fn use_system_accent(cx: &mut App) {
     let Some(accent) = system_accent() else {
         return;
@@ -139,12 +115,9 @@ pub fn use_system_accent(cx: &mut App) {
     theme.apply(cx);
 }
 
-/// Whether the window is the one taking the keyboard, as AppKit has it now.
-///
 /// GPUI keeps its own copy, updated a moment after each of AppKit's notices, and
 /// leaving full screen can leave that copy saying the window is in the background
-/// while it's in front. Windows without a native one, such as the tests', fall back
-/// on GPUI's.
+/// while it's in front.
 #[cfg(target_os = "macos")]
 pub fn is_key_window(window: &Window) -> bool {
     use objc2_app_kit::NSView;
@@ -166,7 +139,6 @@ pub fn is_key_window(window: &Window) -> bool {
     window.is_window_active()
 }
 
-/// Moves the window's close, minimise and zoom buttons, which only a Mac draws.
 pub fn place_buttons(at: Point<Pixels>, window: &Window) {
     #[cfg(target_os = "macos")]
     window.set_traffic_light_position(at);
@@ -262,7 +234,6 @@ mod tests {
     use super::*;
     use gpui_kit::{black, white};
 
-    /// WCAG's contrast ratio between two opaque colours.
     fn contrast(a: Hsla, b: Hsla) -> f32 {
         let luminance = |colour: Hsla| {
             let Rgba { r, g, b, .. } = colour.into();
@@ -279,7 +250,6 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
-    /// The sidebar's tint over the plain blur of what's behind the window.
     fn over(tint: Hsla, alpha: f32, behind: Hsla) -> Hsla {
         let (tint, behind): (Rgba, Rgba) = (tint.into(), behind.into());
         let mix = |t: f32, b: f32| alpha * t + (1. - alpha) * b;

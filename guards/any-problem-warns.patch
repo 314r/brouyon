@@ -5,12 +5,12 @@ Run: verify/check --drift
 Says: may_leave changed
 
 diff --git i/src/app.rs w/src/app.rs
-index 4aec955..b760a5e 100644
+index 017d590..0d36db6 100644
 --- i/src/app.rs
 +++ w/src/app.rs
-@@ -909,7 +909,7 @@ impl Brouyon {
-     /// is refused so the error can be seen, and a second one is let through. Only a
-     /// failed save counts: another problem on screen says nothing about this text.
+@@ -785,7 +785,7 @@ impl Brouyon {
+     }
+ 
      fn may_leave(&mut self, cx: &mut Context<Self>) -> Option<MayLeave> {
 -        let warned = self.save_state.warned();
 +        let warned = self.problem.is_some().then_some(Warned(()));

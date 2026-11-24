@@ -1,6 +1,3 @@
-//! The floating Settings window. The settings themselves belong to the main view:
-//! this window shows them and asks for changes.
-
 use crate::{
     app::{Brouyon, Quit},
     checked::{IdleDelay, NotesDir, TextPercent},
@@ -29,7 +26,6 @@ use gpui_omarchy::{
 use gpui_kit::Focusable;
 
 const CONTEXT: &str = "BrouyonSettings";
-/// The delays on offer, in minutes. 0 means never.
 const IDLE_MINUTES: [f64; 8] = [0., 1., 2., 5., 10., 15., 30., 60.];
 
 gpui_kit::actions!(brouyon, [CloseSettings]);
@@ -43,8 +39,6 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// The theme that follows the desktop's. A Mac has no Omarchy, so there it follows
-/// the system's light or dark appearance.
 const DESKTOP_THEME: &str = if MAC { "System" } else { "Omarchy" };
 
 const THEME_HELP: &str = if MAC {
@@ -106,12 +100,10 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
         titlebar: title_bar::options(),
         app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
-        // Set from the start, so the first frame isn't a solid one.
         window_background: desktop::surface(cx),
         window_min_size: Some(size(px(600.), px(400.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            // Room for the sidebar and the widest button at any text size.
             size(
                 px((30. * config.rem_px(desktop.text_scale)).max(760.)),
                 px(560.),
@@ -122,7 +114,6 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
     }
 }
 
-/// Every delay on offer, shortest first, including one set by hand in the file.
 fn idle_options(current: Option<IdleDelay>) -> Vec<Option<IdleDelay>> {
     let mut options = IDLE_MINUTES.map(IdleDelay::from_minutes).to_vec();
     if !options.contains(&current) {
@@ -240,7 +231,6 @@ impl SettingsWindow {
                             Some(format!("Couldn't choose a folder: {error}").into());
                         cx.notify();
                     }
-                    // Cancelled.
                     _ => {}
                 })
                 .ok();
@@ -287,7 +277,6 @@ impl SettingsWindow {
                     .items_center()
                     .h(rems(BAR_HEIGHT))
                     .px(rems(0.75))
-                    // On macOS the window's buttons sit at its left.
                     .when_some(self.title_bar.buttons_width(window), |heading, buttons| {
                         heading.pl(buttons)
                     }),
@@ -298,7 +287,6 @@ impl SettingsWindow {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let divider = cx.omarchy().divider();
-        // On macOS the window's own buttons close it.
         let close = (!title_bar::DRAWN).then(|| {
             button("close-settings", "", ButtonVariant::Secondary, cx)
                 .accessibility_label("Close settings")
@@ -570,8 +558,6 @@ impl Render for SettingsWindow {
     }
 }
 
-/// A bar along the window's top, which moves the window on macOS. Only for bars
-/// whose controls take no clicks: pressing one would start a move too.
 fn top_bar(bar: Div, title_bar: &TitleBar) -> Div {
     if title_bar::DRAWN {
         title_bar.drags(bar)
@@ -586,7 +572,6 @@ fn page() -> Div {
         .flex_col()
         .gap(rems(1.5))
         .p(rems(1.25))
-        // Keeps the last line clear of the scrollbar's track.
         .pr(rems(1.75))
 }
 
@@ -622,7 +607,6 @@ fn labelled_button(id: &'static str, label: &'static str, name: IconName, cx: &A
         .child(label)
 }
 
-/// Reaches states of this window for the screenshot review.
 #[cfg(test)]
 impl SettingsWindow {
     pub fn show_section_for_test(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -630,7 +614,6 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Toggles the list of delays.
     pub fn open_idle_list_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.idle_choice.read(cx).focus_handle(cx);
         focus.focus(window, cx);
@@ -652,7 +635,6 @@ mod tests {
     use gpui_omarchy::Theme;
     use std::{fs, path::Path, time::Duration};
 
-    /// Opens Settings with its shortcut, and a context to act in that window.
     fn open_settings(
         view: &Entity<Brouyon>,
         cx: &mut VisualTestContext,
@@ -673,7 +655,6 @@ mod tests {
         draw(cx);
     }
 
-    /// Acts in a window expected to close, so there is nothing to redraw after.
     fn closing_click(selector: &'static str, cx: &mut VisualTestContext) {
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), Modifiers::default());
@@ -702,7 +683,6 @@ mod tests {
     fn it_floats_on_linux_and_has_its_own_app_id(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let options = cx.update(|_, cx| window_options(view.read(cx).config(), cx));
-        // A floating window on macOS is a panel that stays above every other window.
         let kind = if MAC {
             WindowKind::Normal
         } else {
@@ -757,7 +737,6 @@ mod tests {
     fn it_opens_again_after_being_closed(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (first, mut settings_cx) = open_settings(&view, cx);
-        // On macOS the window's own button closes it, which the tests can't press.
         if title_bar::DRAWN {
             closing_keys("escape", &mut settings_cx);
         } else {
@@ -873,7 +852,6 @@ mod tests {
         for (button, saved, theme) in [
             ("theme-Light", "light", Theme::flexoki_light()),
             ("theme-Dark", "dark", Theme::tokyo_night()),
-            // Without Omarchy, its theme is Dark's: going from one to the other shows nothing.
             ("theme-Light", "light", Theme::flexoki_light()),
             ("theme-Omarchy", "omarchy", Theme::system_or_default()),
         ] {
@@ -953,7 +931,6 @@ mod tests {
         let (_settings, mut settings_cx) = open_settings(&view, cx);
         open_idle_list(&mut settings_cx);
 
-        // A key opens it again, on the current delay, 5 minutes: two up is 1 minute.
         keys(&mut settings_cx, "escape enter up up enter");
         assert_eq!(
             config(&view, cx).idle.map(IdleDelay::get),
@@ -996,7 +973,6 @@ mod tests {
 
         let mut settings_cx = open_list(0.1, cx);
         assert!(offers("omarchy-choice-option-8", &mut settings_cx));
-        // The list opens on the current delay, and Never is the only shorter one.
         keys(&mut settings_cx, "up enter");
         assert_eq!(config(&view, cx).idle, None);
         click("idle-choice", &mut settings_cx);
@@ -1045,7 +1021,6 @@ mod tests {
                 .contains(new.path().to_str().unwrap())
         );
 
-        // What is typed next goes to the new folder.
         draw(cx);
         type_and_save(cx, "written here");
         assert_eq!(texts(new.path()), ["already there", "written here"]);
@@ -1091,7 +1066,6 @@ mod tests {
     #[gpui_kit::test]
     fn a_pending_question_cannot_act_on_the_new_folder(cx: &mut TestAppContext) {
         let (old, view, cx) = open(cx);
-        // The same file in both trashes, which a question can't tell apart.
         let new = tempfile::tempdir().unwrap();
         for dir in [&old, &new] {
             fs::create_dir_all(dir.path().join(".trash")).unwrap();
