@@ -1,0 +1,17 @@
+Mistake: before 25a48ef, an infinite desktop text size was used
+Run: cargo check --locked --quiet
+Says: expected `TextScale`, found `f32`
+
+diff --git i/src/desktop.rs w/src/desktop.rs
+index 0e65088..adbc7c5 100644
+--- i/src/desktop.rs
++++ w/src/desktop.rs
+@@ -316,7 +316,7 @@ fn text_scale_from(shell_toml: &str) -> Option<TextScale> {
+     let size = value
+         .as_float()
+         .or_else(|| value.as_integer().map(|n| n as f64))? as f32;
+-    TextScale::new(size / OMARCHY_BASELINE_FONT_SIZE)
++    (size > 0.).then_some(size / OMARCHY_BASELINE_FONT_SIZE)
+ }
+ 
+ #[cfg(test)]

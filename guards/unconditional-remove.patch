@@ -1,0 +1,20 @@
+Mistake: before a1a7ee2, emptying a note deleted what was written elsewhere
+Run: verify/check --drift
+Says: remove_unchanged changed
+Run: cargo test --locked --quiet emptying_a_note_changed_elsewhere
+Says: emptying_a_note_changed_elsewhere_keeps_the_file --- FAILED
+
+diff --git i/src/store.rs w/src/store.rs
+index 19b6fe2..55183e3 100644
+--- i/src/store.rs
++++ w/src/store.rs
+@@ -152,7 +152,8 @@ impl Store {
+     }
+ 
+     pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<Removed> {
+-        remove_if_holds(&self.dir.join(id), loaded)
++        let _ = loaded;
++        gone(fs::remove_file(self.dir.join(id))).map(|()| Removed::Gone)
+     }
+ 
+     pub fn trash(&self, id: &str) -> io::Result<NoteId> {

@@ -1,9 +1,3 @@
-//! Markdown highlighting for the editor, a note's text without its Markdown, and
-//! how many words it holds.
-//! Each edit reparses the whole note, which is fine at note size. Colors are
-//! resolved from the theme on every render, so they follow a theme change without
-//! reparsing.
-
 use gpui_kit::base::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputEditorStyle, InputHighlighter,
     InputHighlighterFactory, Rope,
@@ -17,11 +11,8 @@ use pulldown_cmark::{CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEn
 use std::{ops::Range, rc::Rc, sync::Arc};
 
 pub const LANGUAGE: &str = "markdown";
-/// The Markdown the editor shows as such, which is also what [`plain_text`] takes out.
 const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TASKLISTS);
 
-// Marks combine, so `***both***` gets bold and italic and `# **bold**` stays a
-// heading. A mark's bit position is its index in `MARK_NAMES`.
 const HEADING: u8 = 1 << 0;
 const STRONG: u8 = 1 << 1;
 const EMPHASIS: u8 = 1 << 2;
@@ -34,7 +25,6 @@ const MARK_NAMES: [&str; 8] = [
     "heading", "strong", "emphasis", "code", "link", "quote", "marker", "strike",
 ];
 
-/// Ordered, non-overlapping styled ranges of `text`. Unstyled text has no run.
 fn parse(text: &str) -> Vec<(Range<usize>, u8)> {
     let mut marks = vec![0u8; text.len()];
     for (event, range) in Parser::new_ext(text, OPTIONS).into_offset_iter() {
@@ -47,7 +37,6 @@ fn parse(text: &str) -> Vec<(Range<usize>, u8)> {
             Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => (CODE, range),
             Event::Start(Tag::BlockQuote(_)) => (QUOTE, range),
             Event::TaskListMarker(_) | Event::Rule => (MARKER, range),
-            // An item's range is the whole item; only its bullet is the marker.
             Event::Start(Tag::Item) => {
                 let bullet = text[range.clone()]
                     .find(char::is_whitespace)
@@ -74,35 +63,23 @@ fn parse(text: &str) -> Vec<(Range<usize>, u8)> {
     runs
 }
 
-/// The marks a piece of Markdown is written with, which [`plain_text`] takes out.
 enum Marks {
-    /// None to take out: a paragraph, a list, a quote.
     Kept,
-    /// `**`, `*`, `~~` and the like on either side.
     Delimiters,
-    /// The `#`s before, and any after, or the line of `=` or `-` under it.
     Heading,
-    /// The lines of backticks around the code.
     Fences,
-    /// The brackets, and the address unless it is given here to go after the text.
     Link(Option<String>),
 }
 
-/// A piece of Markdown being read, and where what is inside it starts and ends.
 struct Open {
     marks: Marks,
     range: Range<usize>,
     inside: Option<Range<usize>>,
 }
 
-/// `text` without the Markdown that styles it, laid out as it was typed: the same
-/// lines, blank lines and indentation. Headings, bold, italic, struck and code lose
-/// their marks, and a link becomes its text followed by its address. Lists, tasks,
-/// quotes and rules stay as they are, which is how plain text writes them too.
 pub fn plain_text(text: &str) -> String {
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     let mut open: Vec<Open> = Vec::new();
-    // Where the last thing read ended, to tell a `\` that escapes from one that's text.
     let mut read_to = 0;
     let mut in_code = false;
     for (event, range) in Parser::new_ext(text, OPTIONS).into_offset_iter() {
@@ -136,8 +113,6 @@ pub fn plain_text(text: &str) -> String {
                         dest_url,
                         ..
                     } => Marks::Link(
-                        // Elsewhere the address is the text itself, or stays in
-                        // the note on a line of its own.
                         (link_type == LinkType::Inline && !dest_url.is_empty())
                             .then(|| dest_url.to_string()),
                     ),
@@ -160,7 +135,6 @@ pub fn plain_text(text: &str) -> String {
                 if escaped {
                     edits.push((range.start - 1..range.start, String::new()));
                 }
-                // `&amp;` and its kind.
                 if typed.starts_with('&') && *typed != *shown {
                     edits.push((range.clone(), shown.to_string()));
                 }
@@ -174,8 +148,6 @@ pub fn plain_text(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut kept_to = 0;
     for (range, replacement) in edits {
-        // A `\` before the first thing inside a piece is already among its marks,
-        // and the wider edit, which comes first, stands.
         if range.start < kept_to {
             continue;
         }
@@ -187,17 +159,12 @@ pub fn plain_text(text: &str) -> String {
     plain
 }
 
-/// How many words someone reading `text` would count: what is written, without the
-/// marks around it, the bullet, number or box of a list item, or a link's address.
-/// Something with no letter or digit in it, such as a dash, isn't a word.
 pub fn word_count(text: &str) -> usize {
     let mut count = 0;
-    // The word being read has a letter or a digit in it.
     let mut counts = false;
     for event in Parser::new_ext(text, OPTIONS) {
         let read = match &event {
             Event::Text(read) | Event::Code(read) => read.as_ref(),
-            // Styling can begin and end inside a word, which is still one word.
             Event::InlineHtml(_)
             | Event::Start(
                 Tag::Emphasis
@@ -213,7 +180,6 @@ pub fn word_count(text: &str) -> usize {
                 | TagEnd::Link
                 | TagEnd::Image,
             ) => "",
-            // Anything else ends a word: a new line, the next paragraph or item.
             _ => " ",
         };
         for character in read.chars() {
@@ -228,7 +194,6 @@ pub fn word_count(text: &str) -> usize {
     count + usize::from(counts)
 }
 
-/// Adds the edits that take `piece`'s own marks out, now that its extent is known.
 fn strip(text: &str, piece: Open, edits: &mut Vec<(Range<usize>, String)>) {
     let Open {
         marks,
@@ -236,7 +201,6 @@ fn strip(text: &str, piece: Open, edits: &mut Vec<(Range<usize>, String)>) {
         inside,
     } = piece;
     let label = inside.clone().map_or("", |inside| &text[inside]);
-    // With nothing inside, all of it is marks.
     let (before, after) = match inside {
         Some(inside) => (range.start..inside.start, inside.end..range.end),
         None => (range.start..range.start, range),
@@ -249,13 +213,11 @@ fn strip(text: &str, piece: Open, edits: &mut Vec<(Range<usize>, String)>) {
         }
         Marks::Heading => {
             edits.push((before, String::new()));
-            // The heading's own line ending stays.
             let marks = text[after.clone()].trim_end_matches(['\n', '\r']);
             edits.push((after.start..after.start + marks.len(), String::new()));
         }
         Marks::Fences => {
             edits.push((before, String::new()));
-            // The closing line goes whole, so no blank one is left in its place.
             let line_end = match &text[after.end..] {
                 _ if after.is_empty() => 0,
                 rest if rest.starts_with("\r\n") => 2,
@@ -391,7 +353,6 @@ impl HighlightStyleResolver for MarkdownStyles {
     }
 }
 
-/// The editor's colors for the current theme, including markdown styles.
 pub fn editor_style(theme: &Theme) -> InputEditorStyle {
     InputEditorStyle {
         highlight_styles: Arc::new(MarkdownStyles {
@@ -406,58 +367,126 @@ pub fn editor_style(theme: &Theme) -> InputEditorStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{AppContext, TestAppContext, VisualTestContext};
 
-    /// Text covered by each mark, in order, for readable expectations.
-    fn marked(text: &str, mark: u8) -> Vec<&str> {
-        parse(text)
+    fn highlighter(text: &str, cx: &mut VisualTestContext) -> Box<dyn InputHighlighter> {
+        let mut highlighter = highlighter_factory()(LANGUAGE).unwrap();
+        cx.update(|window, cx| {
+            let editor = cx.new(|cx| EditorState::new(window, cx));
+            editor.update(cx, |_, cx| {
+                highlighter.update(None, &Rope::from(text), false, window, cx);
+            });
+        });
+        highlighter
+    }
+
+    fn styles(
+        highlighter: &dyn InputHighlighter,
+        range: &Range<usize>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let editor = editor_style(&Theme::tokyo_night());
+        highlighter.styles(range, &*editor.highlight_styles)
+    }
+
+    fn styled<'a>(text: &'a str, cx: &mut VisualTestContext) -> Vec<(&'a str, HighlightStyle)> {
+        styles(&*highlighter(text, cx), &(0..text.len()))
             .into_iter()
-            .filter(|(_, marks)| marks & mark != 0)
-            .map(|(range, _)| &text[range])
+            .map(|(range, style)| (&text[range], style))
             .collect()
     }
 
-    struct EveryMarkStyled;
-    impl HighlightStyleResolver for EveryMarkStyled {
-        fn style(&self, _: &str) -> Option<HighlightStyle> {
-            Some(HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            })
+    fn colored(color: Hsla) -> HighlightStyle {
+        HighlightStyle {
+            color: Some(color),
+            ..Default::default()
         }
     }
 
-    #[test]
-    fn recognizes_the_common_markdown_elements() {
-        assert_eq!(marked("# Title\n", HEADING), ["# Title\n"]);
-        assert_eq!(marked("a **b** c", STRONG), ["**b**"]);
-        assert_eq!(marked("a *b* c", EMPHASIS), ["*b*"]);
-        assert_eq!(marked("a ~~b~~ c", STRIKE), ["~~b~~"]);
-        assert_eq!(marked("a `b` c", CODE), ["`b`"]);
-        assert_eq!(marked("```\ncode\n```\n", CODE), ["```\ncode\n```"]);
-        assert_eq!(marked("[a](http://b)", LINK), ["[a](http://b)"]);
-        assert_eq!(marked("> quote\n", QUOTE), ["> quote\n"]);
-        assert_eq!(marked("---\n", MARKER), ["---\n"]);
+    #[gpui_kit::test]
+    fn recognizes_the_common_markdown_elements(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let t = Theme::tokyo_night();
+        let plain = HighlightStyle::default();
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..plain
+        };
+        let italic = HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..plain
+        };
+        let heading = bold.highlight(colored(t.accent));
+        let struck = HighlightStyle {
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(t.secondary),
+            }),
+            ..colored(t.secondary)
+        };
+        let link = HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(t.accent),
+                wavy: false,
+            }),
+            ..colored(t.accent)
+        };
+        for (piece, style) in [
+            ("# Title\n", heading),
+            ("```\ncode\n```", colored(t.success)),
+            ("[a](http://b)", link),
+            ("> quote\n", colored(t.secondary)),
+            ("---\n", colored(t.secondary)),
+            ("just some words\n", plain),
+        ] {
+            assert_eq!(styled(piece, cx), [(piece, style)]);
+        }
+        for (piece, style) in [
+            ("**b**", bold),
+            ("*b*", italic),
+            ("~~b~~", struck),
+            ("`b`", colored(t.success)),
+        ] {
+            let text = format!("a {piece} c");
+            let expected = [("a ", plain), (piece, style), (" c", plain)];
+            assert_eq!(styled(&text, cx), expected);
+        }
+        assert!(styled("", cx).is_empty());
     }
 
-    #[test]
-    fn only_the_bullet_of_a_list_item_is_a_marker() {
-        assert_eq!(marked("- one\n- two\n", MARKER), ["-", "-"]);
-        assert_eq!(marked("1. one\n", MARKER), ["1."]);
-        assert_eq!(marked("- [x] done\n", MARKER), ["-", "[x]"]);
+    #[gpui_kit::test]
+    fn only_the_bullet_of_a_list_item_is_a_marker(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let marker = colored(Theme::tokyo_night().secondary);
+        for (text, markers) in [
+            ("- one\n- two\n", vec!["-", "-"]),
+            ("1. one\n", vec!["1."]),
+            ("- [x] done\n", vec!["-", "[x]"]),
+        ] {
+            let mut pieces = styled(text, cx);
+            pieces.retain(|(_, style)| *style != HighlightStyle::default());
+            let expected: Vec<_> = markers.into_iter().map(|piece| (piece, marker)).collect();
+            assert_eq!(pieces, expected);
+        }
     }
 
-    #[test]
-    fn nested_marks_combine() {
-        let runs = parse("***both***");
-        assert!(
-            runs.iter()
-                .any(|(_, m)| m & STRONG != 0 && m & EMPHASIS != 0)
-        );
-        let runs = parse("# a **b**\n");
-        assert!(
-            runs.iter()
-                .any(|(_, m)| m & STRONG != 0 && m & HEADING != 0)
-        );
+    #[gpui_kit::test]
+    fn nested_marks_combine(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let heading = bold.highlight(colored(Theme::tokyo_night().accent));
+        let italic = |style| HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..style
+        };
+        let mut shown = |text, style| styled(text, cx).iter().any(|piece| piece.1 == style);
+        assert!(shown("***both***", italic(bold)));
+        assert!(shown("# a *b*\n", italic(heading)));
+        let in_heading = styled("# a **b**\n", cx);
+        assert!(in_heading.iter().all(|piece| piece.1 == heading));
     }
 
     #[test]
@@ -517,7 +546,6 @@ mod tests {
             plain_text("<http://a> or <me@example.org>"),
             "http://a or me@example.org"
         );
-        // The address stays where it was written.
         assert_eq!(
             plain_text("[a][ref]\n\n[ref]: http://a\n"),
             "a\n\n[ref]: http://a\n"
@@ -567,8 +595,6 @@ mod tests {
         assert_eq!(plain_text("<b>html</b> stays"), "<b>html</b> stays");
     }
 
-    /// Whatever is typed, nothing is cut inside a character, and text with no
-    /// Markdown in it comes back as it was.
     #[test]
     fn plain_text_copes_with_unfinished_markdown() {
         for text in [
@@ -623,16 +649,9 @@ mod tests {
         assert_eq!(word_count("end of one\n**start** of the next"), 7);
     }
 
-    #[test]
-    fn plain_text_and_empty_notes_have_no_runs() {
-        assert!(parse("").is_empty());
-        assert!(parse("just some words\n").is_empty());
-    }
-
-    /// Exercises the contract the editor relies on: runs are ordered, do not
-    /// overlap, fully cover the requested range and land on char boundaries.
-    #[test]
-    fn styles_fully_cover_any_range_in_order() {
+    #[gpui_kit::test]
+    fn styles_fully_cover_any_range_in_order(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
         for text in [
             "",
             "plain",
@@ -642,7 +661,7 @@ mod tests {
             "***\n**unterminated *nest\n`open\n",
             "日本語 **太字** テキスト\n\n# 見出し\n",
         ] {
-            let highlighter = MarkdownHighlighter { runs: parse(text) };
+            let highlighter = highlighter(text, cx);
             let boundaries: Vec<_> = text
                 .char_indices()
                 .map(|(i, _)| i)
@@ -651,7 +670,7 @@ mod tests {
             for &start in &boundaries {
                 for &end in boundaries.iter().filter(|&&end| end >= start) {
                     let range = start..end;
-                    let styles = highlighter.styles(&range, &EveryMarkStyled);
+                    let styles = styles(&*highlighter, &range);
                     let mut position = start;
                     for (run, _) in &styles {
                         assert_eq!(run.start, position, "gap or overlap in {text:?} {range:?}");
@@ -664,18 +683,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn unstyled_text_between_runs_gets_the_default_style() {
-        let highlighter = MarkdownHighlighter {
-            runs: parse("a **b** c"),
-        };
-        let styles = highlighter.styles(&(0..9), &EveryMarkStyled);
-        assert_eq!(styles.len(), 3);
-        assert_eq!(styles[0], (0..2, HighlightStyle::default()));
-        assert_eq!(styles[1].0, 2..7);
-        assert_ne!(styles[1].1, HighlightStyle::default());
-        assert_eq!(styles[2], (7..9, HighlightStyle::default()));
     }
 }

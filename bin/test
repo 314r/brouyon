@@ -1,10 +1,14 @@
 #!/bin/sh
 # Runs the tests, none of which open a window or touch real notes, then checks that
-# THIRD-PARTY-LICENSES.txt still matches Cargo.lock (bin/licenses rewrites it).
+# THIRD-PARTY-LICENSES.txt still matches Cargo.lock (bin/licenses rewrites it), and
+# the rules in tools/lint.
 set -eu
 
 cd "$(dirname "$0")/.."
 cargo test "$@"
+# Again with what a Mac shows, which Linux can draw too.
+cargo test --features mac-look "$@"
 # Again with the editor an iPhone gets, which a desktop can draw too.
 cargo test --features touch-editor "$@"
 python3 tools/third-party-licenses --check
+tools/lint

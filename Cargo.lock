@@ -735,6 +735,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "pulldown-cmark",
  "raw-window-handle",
+ "rustix",
  "serde",
  "tempfile",
  "toml 0.8.23",

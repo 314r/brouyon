@@ -13,6 +13,8 @@ repository = "https://github.com/314r/brouyon"
 # gpui-omarchy's has neither. An iPhone always gets it, and this turns it on anywhere
 # else, which is how the tests run it: `cargo test --features touch-editor`.
 touch-editor = ["gpui-kit/component"]
+# What a Mac shows, its keys and its labels, on any system: `cargo test --features mac-look`.
+mac-look = []
 
 [dependencies]
 gpui-kit = { version = "0.9.0", default-features = false, features = ["assets"] }
@@ -21,6 +23,7 @@ chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 toml_edit = "0.22"
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 notify = "7"
 async-channel = "2"
 

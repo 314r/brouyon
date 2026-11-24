@@ -1,0 +1,17 @@
+Mistake: before 25a48ef, a text_percent near the largest integer overflowed
+Run: cargo test --locked --quiet text_size_snaps
+Says: text_size_snaps_to_whole_steps_within_the_limits --- FAILED
+
+diff --git i/src/checked.rs w/src/checked.rs
+index 8dd99eb..d2fd0ef 100644
+--- i/src/checked.rs
++++ w/src/checked.rs
+@@ -33,7 +33,7 @@ impl TextPercent {
+     const STEP: u32 = 10;
+ 
+     pub fn nearest(percent: u32) -> Self {
+-        let steps = percent.saturating_add(Self::STEP / 2) / Self::STEP;
++        let steps = (percent + Self::STEP / 2) / Self::STEP;
+         Self((steps * Self::STEP).clamp(Self::MIN.0, Self::MAX.0))
+     }
+ 

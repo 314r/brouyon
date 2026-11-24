@@ -1,0 +1,54 @@
+Mistake: Find kept its own copy of what was typed in it, and missed what an input method composed
+Run: tools/lint
+Says: which composed text never emits
+Run: cargo test --locked --quiet finding_follows
+Says: finding_follows_what_an_input_method_composes --- FAILED
+
+diff --git i/src/app.rs w/src/app.rs
+index 017d590..60bee60 100644
+--- i/src/app.rs
++++ w/src/app.rs
+@@ -276,6 +276,7 @@ pub struct Brouyon {
+     seen: SharedString,
+     filter: Entity<InputState>,
+     filter_open: bool,
++    filter_terms: Vec<String>,
+     listed_for: Vec<String>,
+     save_state: SaveState,
+     loaded: Option<Loaded>,
+@@ -332,6 +333,7 @@ impl Brouyon {
+             seen: SharedString::default(),
+             filter,
+             filter_open: false,
++            filter_terms: Vec::new(),
+             listed_for: Vec::new(),
+             save_state: SaveState::default(),
+             loaded: None,
+@@ -445,6 +447,10 @@ impl Brouyon {
+         cx: &mut Context<Self>,
+     ) {
+         match event {
++            InputEvent::Change => {
++                self.filter_terms = store::terms(&self.filter.read(cx).value());
++                cx.notify();
++            }
+             InputEvent::PressEnter { .. } if self.terms(cx).is_empty() => {
+                 self.close_filter();
+                 self.focus_content(window, cx);
+@@ -474,13 +480,11 @@ impl Brouyon {
+ 
+     fn close_filter(&mut self) {
+         self.filter_open = false;
++        self.filter_terms.clear();
+     }
+ 
+-    fn terms(&self, cx: &App) -> Vec<String> {
+-        if !self.filter_open {
+-            return Vec::new();
+-        }
+-        store::terms(&self.filter.read(cx).value())
++    fn terms(&self, _: &App) -> Vec<String> {
++        self.filter_terms.clone()
+     }
+ 
+     fn edit_list(

@@ -1,13 +1,10 @@
-//! The floating Settings window. The settings themselves belong to the main view:
-//! this window shows them and asks for changes.
-
 use crate::{
     app::{Brouyon, Quit},
-    config::{
-        Config, DEFAULT_TEXT_PERCENT, MAX_TEXT_PERCENT, MIN_TEXT_PERCENT, TEXT_PERCENT_STEP,
-        ThemeMode,
-    },
+    checked::{IdleDelay, NotesDir, TextPercent},
+    config::{Config, ThemeMode},
     desktop::{self, Desktop},
+    kept,
+    look::MAC,
     shortcuts::primary,
     title_bar::{self, BAR_HEIGHT, TitleBar},
 };
@@ -24,14 +21,12 @@ use gpui_omarchy::{
     ActiveTheme, Button, ButtonVariant, ChoiceItem, ChoiceState, IconName, button, focus_scope,
     icon, scrollbar, select,
 };
-use std::time::Duration;
 
 #[cfg(test)]
 use gpui_kit::Focusable;
 
 const CONTEXT: &str = "BrouyonSettings";
-/// The delays on offer, in minutes. 0 means never.
-const IDLE_MINUTES: [u64; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
+const IDLE_MINUTES: [f64; 8] = [0., 1., 2., 5., 10., 15., 30., 60.];
 
 gpui_kit::actions!(brouyon, [CloseSettings]);
 
@@ -44,27 +39,22 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// The theme that follows the desktop's. A Mac has no Omarchy, so there it follows
-/// the system's light or dark appearance.
-#[cfg(not(target_os = "macos"))]
-const DESKTOP_THEME: &str = "Omarchy";
-#[cfg(target_os = "macos")]
-const DESKTOP_THEME: &str = "System";
+const DESKTOP_THEME: &str = if MAC { "System" } else { "Omarchy" };
 
-#[cfg(not(target_os = "macos"))]
-const THEME_HELP: &str = "Omarchy follows the current desktop theme and its changes. Light and \
-     Dark only set the colours: window transparency, the corners, the font and the text size \
-     still follow the desktop.";
-#[cfg(target_os = "macos")]
-const THEME_HELP: &str = "System follows macOS between light and dark as it changes. Light and \
-     Dark stay put.";
+const THEME_HELP: &str = if MAC {
+    "System follows macOS between light and dark as it changes. Light and Dark stay put."
+} else {
+    "Omarchy follows the current desktop theme and its changes. Light and Dark only set the \
+     colours: window transparency, the corners, the font and the text size still follow the \
+     desktop."
+};
 
-#[cfg(not(target_os = "macos"))]
-const TEXT_SIZE_HELP: &str = "Scales the desktop's text size throughout Brouyon. In the main \
-     window, Ctrl+Plus, Ctrl+Minus and Ctrl+0 do the same.";
-#[cfg(target_os = "macos")]
-const TEXT_SIZE_HELP: &str = "Scales the text throughout Brouyon. In the main window, ⌘+, ⌘− \
-     and ⌘0 do the same.";
+const TEXT_SIZE_HELP: &str = if MAC {
+    "Scales the text throughout Brouyon. In the main window, ⌘+, ⌘− and ⌘0 do the same."
+} else {
+    "Scales the desktop's text size throughout Brouyon. In the main window, Ctrl+Plus, \
+     Ctrl+Minus and Ctrl+0 do the same."
+};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -110,12 +100,10 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
         titlebar: title_bar::options(),
         app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
-        // Set from the start, so the first frame isn't a solid one.
         window_background: desktop::surface(cx),
         window_min_size: Some(size(px(600.), px(400.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            // Room for the sidebar and the widest button at any text size.
             size(
                 px((30. * config.rem_px(desktop.text_scale)).max(760.)),
                 px(560.),
@@ -126,12 +114,8 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
     }
 }
 
-/// Every delay on offer, shortest first, including one set by hand in the file.
-fn idle_options(current: Option<Duration>) -> Vec<Option<Duration>> {
-    let mut options: Vec<_> = IDLE_MINUTES
-        .iter()
-        .map(|&minutes| (minutes > 0).then(|| Duration::from_secs(minutes * 60)))
-        .collect();
+fn idle_options(current: Option<IdleDelay>) -> Vec<Option<IdleDelay>> {
+    let mut options = IDLE_MINUTES.map(IdleDelay::from_minutes).to_vec();
     if !options.contains(&current) {
         options.push(current);
         options.sort();
@@ -139,8 +123,8 @@ fn idle_options(current: Option<Duration>) -> Vec<Option<Duration>> {
     options
 }
 
-fn idle_label(idle: Option<Duration>) -> String {
-    match idle.map(|idle| idle.as_secs()) {
+fn idle_label(idle: Option<IdleDelay>) -> String {
+    match idle.map(|idle| idle.get().as_secs()) {
         None => "Never".into(),
         Some(60) => "After 1 minute".into(),
         Some(3600) => "After 1 hour".into(),
@@ -153,7 +137,7 @@ pub struct SettingsWindow {
     app: Entity<Brouyon>,
     app_window: WindowHandle<Brouyon>,
     section: Section,
-    idle_options: Vec<Option<Duration>>,
+    idle_options: Vec<Option<IdleDelay>>,
     idle_choice: Entity<ChoiceState>,
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -239,7 +223,7 @@ impl SettingsWindow {
                 .update(cx, |app, window, cx| match answer {
                     Ok(Ok(Some(paths))) => {
                         if let Some(dir) = paths.into_iter().next() {
-                            app.set_notes_dir(Some(dir), window, cx);
+                            app.set_notes_dir(Some(NotesDir::new(dir)), window, cx);
                         }
                     }
                     Ok(Err(error)) => {
@@ -247,7 +231,6 @@ impl SettingsWindow {
                             Some(format!("Couldn't choose a folder: {error}").into());
                         cx.notify();
                     }
-                    // Cancelled.
                     _ => {}
                 })
                 .ok();
@@ -294,7 +277,6 @@ impl SettingsWindow {
                     .items_center()
                     .h(rems(BAR_HEIGHT))
                     .px(rems(0.75))
-                    // On macOS the window's buttons sit at its left.
                     .when_some(self.title_bar.buttons_width(window), |heading, buttons| {
                         heading.pl(buttons)
                     }),
@@ -305,13 +287,12 @@ impl SettingsWindow {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let divider = cx.omarchy().divider();
-        // On macOS the window's own buttons close it.
         let close = (!title_bar::DRAWN).then(|| {
             button("close-settings", "", ButtonVariant::Secondary, cx)
                 .accessibility_label("Close settings")
                 .debug_selector(|| "close-settings".into())
                 .child(icon(IconName::Close))
-                .on_click(|_, window, _| window.remove_window())
+                .on_click(|_, window, _| kept::close_textless(window))
         });
         top_bar(
             div()
@@ -350,31 +331,26 @@ impl SettingsWindow {
         });
         let percent = config.text_percent;
         let text_size_button =
-            |id: &'static str, label: String, to: u32, cx: &mut Context<Self>| {
+            |id: &'static str, label: String, to: TextPercent, cx: &mut Context<Self>| {
                 button(id, label, ButtonVariant::Outline, cx)
                     .debug_selector(move || id.into())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app.update(cx, |app, cx| app.set_text_percent(to, cx));
                     }))
             };
-        let smaller = text_size_button(
-            "text-smaller",
-            "−".into(),
-            percent.saturating_sub(TEXT_PERCENT_STEP),
-            cx,
-        )
-        .accessibility_label("Decrease text size")
-        .disabled(percent <= MIN_TEXT_PERCENT);
+        let smaller = text_size_button("text-smaller", "−".into(), percent.smaller(), cx)
+            .accessibility_label("Decrease text size")
+            .disabled(percent == TextPercent::MIN);
         let reset = text_size_button(
             "text-reset",
-            format!("{percent} %"),
-            DEFAULT_TEXT_PERCENT,
+            format!("{} %", percent.get()),
+            TextPercent::default(),
             cx,
         )
         .accessibility_label("Reset text size to the desktop's");
-        let larger = text_size_button("text-larger", "+".into(), percent + TEXT_PERCENT_STEP, cx)
+        let larger = text_size_button("text-larger", "+".into(), percent.larger(), cx)
             .accessibility_label("Increase text size")
-            .disabled(percent >= MAX_TEXT_PERCENT);
+            .disabled(percent == TextPercent::MAX);
 
         page()
             .child(
@@ -448,12 +424,12 @@ impl SettingsWindow {
             )
             .child(
                 section("Blank note", cx)
-                    .child(div().w(rems(15.)).child(select(
-                        "idle-choice",
-                        &self.idle_choice,
-                        window,
-                        cx,
-                    )))
+                    .child(
+                        div()
+                            .debug_selector(|| "idle-choice".into())
+                            .w(rems(15.))
+                            .child(select("idle-choice", &self.idle_choice, window, cx)),
+                    )
                     .child(description(
                         "When nothing is typed or clicked for this long, Brouyon saves the note \
                          and puts a blank one in its place, as when it opens.",
@@ -537,13 +513,10 @@ impl Render for SettingsWindow {
             .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
                 if !this.idle_choice.read(cx).is_open() {
                     cx.stop_propagation();
-                    window.remove_window();
+                    kept::close_textless(window);
                 }
             }))
-            .on_action(|_: &CloseSettings, window, _| window.remove_window())
-            .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                this.app.update(cx, |app, cx| app.quit(cx));
-            }))
+            .on_action(|_: &CloseSettings, window, _| kept::close_textless(window))
             .child(sidebar)
             .child(
                 div()
@@ -585,8 +558,6 @@ impl Render for SettingsWindow {
     }
 }
 
-/// A bar along the window's top, which moves the window on macOS. Only for bars
-/// whose controls take no clicks: pressing one would start a move too.
 fn top_bar(bar: Div, title_bar: &TitleBar) -> Div {
     if title_bar::DRAWN {
         title_bar.drags(bar)
@@ -601,7 +572,6 @@ fn page() -> Div {
         .flex_col()
         .gap(rems(1.5))
         .p(rems(1.25))
-        // Keeps the last line clear of the scrollbar's track.
         .pr(rems(1.75))
 }
 
@@ -637,7 +607,6 @@ fn labelled_button(id: &'static str, label: &'static str, name: IconName, cx: &A
         .child(label)
 }
 
-/// Reaches states of this window for the screenshot review.
 #[cfg(test)]
 impl SettingsWindow {
     pub fn show_section_for_test(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -645,7 +614,6 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Toggles the list of delays.
     pub fn open_idle_list_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.idle_choice.read(cx).focus_handle(cx);
         focus.focus(window, cx);
@@ -659,14 +627,14 @@ impl SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{draw, keys, on_this_system, open, open_with, type_and_save};
+    use crate::app::tests::{draw, is_said, keys, on_this_system, open, open_with, type_and_save};
+    use crate::checked::TextScale;
     use crate::config::Config;
     use crate::desktop::Transparency;
     use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
     use gpui_omarchy::Theme;
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, time::Duration};
 
-    /// Opens Settings with its shortcut, and a context to act in that window.
     fn open_settings(
         view: &Entity<Brouyon>,
         cx: &mut VisualTestContext,
@@ -687,7 +655,6 @@ mod tests {
         draw(cx);
     }
 
-    /// Acts in a window expected to close, so there is nothing to redraw after.
     fn closing_click(selector: &'static str, cx: &mut VisualTestContext) {
         let bounds = cx.debug_bounds(selector).unwrap();
         cx.simulate_click(bounds.center(), Modifiers::default());
@@ -707,23 +674,16 @@ mod tests {
         cx.update(|_, cx| settings.update(cx, |_, _, _| ()).is_ok())
     }
 
-    fn focus_idle_choice(settings: WindowHandle<SettingsWindow>, cx: &mut VisualTestContext) {
+    fn open_idle_list(cx: &mut VisualTestContext) {
         click("section-Notes", cx);
-        settings
-            .update(cx, |this, window, cx| {
-                let focus = this.idle_choice.read(cx).focus_handle(cx);
-                focus.focus(window, cx);
-            })
-            .unwrap();
-        draw(cx);
+        click("idle-choice", cx);
     }
 
     #[gpui_kit::test]
     fn it_floats_on_linux_and_has_its_own_app_id(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let options = cx.update(|_, cx| window_options(view.read(cx).config(), cx));
-        // A floating window on macOS is a panel that stays above every other window.
-        let kind = if cfg!(target_os = "macos") {
+        let kind = if MAC {
             WindowKind::Normal
         } else {
             WindowKind::Floating
@@ -732,31 +692,16 @@ mod tests {
         assert_eq!(options.app_id.as_deref(), Some("brouyon-settings"));
     }
 
-    #[cfg(target_os = "macos")]
-    #[gpui_kit::test]
-    fn it_opens_over_a_blur_whatever_the_mode(cx: &mut TestAppContext) {
-        let (_dir, view, cx) = open(cx);
-        for mode in [Transparency::Opaque, Transparency::Glassy] {
-            cx.update(|_, cx| cx.global_mut::<Desktop>().transparency = mode);
-            let surface =
-                cx.update(|_, cx| window_options(view.read(cx).config(), cx).window_background);
-            assert_eq!(surface, gpui_kit::WindowBackgroundAppearance::Blurred);
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn it_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
+        use gpui_kit::WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
         let (_dir, view, cx) = open(cx);
         let surface = |cx: &mut VisualTestContext| {
             cx.update(|_, cx| window_options(view.read(cx).config(), cx).window_background)
         };
-        assert_eq!(surface(cx), gpui_kit::WindowBackgroundAppearance::Opaque);
+        assert_eq!(surface(cx), if MAC { Blurred } else { Opaque });
         cx.update(|_, cx| cx.global_mut::<Desktop>().transparency = Transparency::Glassy);
-        assert_eq!(
-            surface(cx),
-            gpui_kit::WindowBackgroundAppearance::Transparent
-        );
+        assert_eq!(surface(cx), if MAC { Blurred } else { Transparent });
     }
 
     #[gpui_kit::test]
@@ -765,7 +710,7 @@ mod tests {
         let (settings, mut settings_cx) = open_settings(&view, cx);
         let base = cx.update(|window, _| window.rem_size());
 
-        cx.update(|_, cx| cx.global_mut::<Desktop>().text_scale = 2.);
+        cx.update(|_, cx| cx.global_mut::<Desktop>().text_scale = TextScale::new(2.).unwrap());
         cx.run_until_parked();
         draw(cx);
         draw(&mut settings_cx);
@@ -792,7 +737,6 @@ mod tests {
     fn it_opens_again_after_being_closed(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (first, mut settings_cx) = open_settings(&view, cx);
-        // On macOS the window's own button closes it, which the tests can't press.
         if title_bar::DRAWN {
             closing_keys("escape", &mut settings_cx);
         } else {
@@ -822,6 +766,8 @@ mod tests {
         cx.simulate_input("precious");
         closing_keys("ctrl-q", &mut settings_cx);
         cx.update(|_, cx| assert!(view.read(cx).has_problem()));
+        draw(cx);
+        assert!(is_said("status-problem", cx));
     }
 
     #[gpui_kit::test]
@@ -840,13 +786,9 @@ mod tests {
     fn escape_closes_an_open_list_before_the_window(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (settings, mut settings_cx) = open_settings(&view, cx);
-        focus_idle_choice(settings, &mut settings_cx);
-        keys(&mut settings_cx, "enter");
-        let list_is_open = |cx: &mut VisualTestContext| {
-            settings
-                .update(cx, |this, _, cx| this.idle_choice.read(cx).is_open())
-                .unwrap()
-        };
+        open_idle_list(&mut settings_cx);
+        let list_is_open =
+            |cx: &mut VisualTestContext| cx.debug_bounds("omarchy-choice-popup").is_some();
         assert!(list_is_open(&mut settings_cx));
 
         keys(&mut settings_cx, "escape");
@@ -907,31 +849,16 @@ mod tests {
     fn choosing_a_theme_applies_and_saves_it(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (_settings, mut settings_cx) = open_settings(&view, cx);
-
-        click("theme-Light", &mut settings_cx);
-        cx.update(|_, cx| assert_eq!(cx.omarchy().name, Theme::flexoki_light().name));
-        assert!(config(&view, cx).saved_text().contains("theme = \"light\""));
-
-        click("theme-Dark", &mut settings_cx);
-        cx.update(|_, cx| assert_eq!(cx.omarchy().name, Theme::tokyo_night().name));
-        assert!(config(&view, cx).saved_text().contains("theme = \"dark\""));
-
-        click("theme-Omarchy", &mut settings_cx);
-        cx.update(|_, cx| assert_eq!(cx.omarchy().name, Theme::system_or_default().name));
-        assert!(
-            config(&view, cx)
-                .saved_text()
-                .contains("theme = \"omarchy\"")
-        );
-    }
-
-    #[gpui_kit::test]
-    fn every_theme_keeps_the_mono_font_on_widgets(cx: &mut TestAppContext) {
-        let (_dir, view, cx) = open(cx);
-        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
-            view.update(cx, |this, cx| this.set_theme(mode, cx));
-            cx.run_until_parked();
-            cx.update(|_, cx| assert_eq!(cx.omarchy().font, cx.omarchy().mono_font));
+        for (button, saved, theme) in [
+            ("theme-Light", "light", Theme::flexoki_light()),
+            ("theme-Dark", "dark", Theme::tokyo_night()),
+            ("theme-Light", "light", Theme::flexoki_light()),
+            ("theme-Omarchy", "omarchy", Theme::system_or_default()),
+        ] {
+            click(button, &mut settings_cx);
+            cx.update(|_, cx| assert_eq!(cx.omarchy().name, theme.name));
+            let saved = format!("theme = \"{saved}\"");
+            assert!(config(&view, cx).saved_text().contains(&saved), "{saved}");
         }
     }
 
@@ -943,7 +870,7 @@ mod tests {
 
         click("text-larger", &mut settings_cx);
         draw(cx);
-        assert_eq!(config(&view, cx).text_percent, 110);
+        assert_eq!(config(&view, cx).text_percent.get(), 110);
         cx.update(|window, _| assert_eq!(window.rem_size(), base * 1.1));
         settings
             .update(&mut settings_cx, |_, window, _| {
@@ -957,12 +884,16 @@ mod tests {
         );
 
         click("text-reset", &mut settings_cx);
-        assert_eq!(config(&view, cx).text_percent, 100);
+        assert_eq!(config(&view, cx).text_percent.get(), 100);
 
         for _ in 0..4 {
             click("text-smaller", &mut settings_cx);
         }
-        assert_eq!(config(&view, cx).text_percent, 80, "stops at the minimum");
+        assert_eq!(
+            config(&view, cx).text_percent.get(),
+            80,
+            "stops at the minimum"
+        );
     }
 
     #[gpui_kit::test]
@@ -970,13 +901,13 @@ mod tests {
         let (_dir, view, cx) = open(cx);
         cx.simulate_input("kept");
         keys(cx, "ctrl-=");
-        assert_eq!(config(&view, cx).text_percent, 110);
+        assert_eq!(config(&view, cx).text_percent.get(), 110);
         keys(cx, "ctrl-+");
-        assert_eq!(config(&view, cx).text_percent, 120);
+        assert_eq!(config(&view, cx).text_percent.get(), 120);
         keys(cx, "ctrl--");
-        assert_eq!(config(&view, cx).text_percent, 110);
+        assert_eq!(config(&view, cx).text_percent.get(), 110);
         keys(cx, "ctrl-0");
-        assert_eq!(config(&view, cx).text_percent, 100);
+        assert_eq!(config(&view, cx).text_percent.get(), 100);
         cx.update(|_, cx| assert_eq!(view.read(cx).editor_text(cx), "kept"));
     }
 
@@ -986,23 +917,25 @@ mod tests {
         for _ in 0..14 {
             keys(cx, "ctrl-=");
         }
-        assert_eq!(config(&view, cx).text_percent, MAX_TEXT_PERCENT);
+        assert_eq!(config(&view, cx).text_percent, TextPercent::MAX);
         for _ in 0..14 {
             keys(cx, "ctrl--");
         }
-        assert_eq!(config(&view, cx).text_percent, MIN_TEXT_PERCENT);
+        assert_eq!(config(&view, cx).text_percent, TextPercent::MIN);
     }
 
     #[gpui_kit::test]
     fn choosing_a_delay_saves_it_and_it_applies_at_once(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         type_and_save(cx, "a note");
-        let (settings, mut settings_cx) = open_settings(&view, cx);
-        focus_idle_choice(settings, &mut settings_cx);
+        let (_settings, mut settings_cx) = open_settings(&view, cx);
+        open_idle_list(&mut settings_cx);
 
-        // The list opens on the current delay, 5 minutes: two up is 1 minute.
-        keys(&mut settings_cx, "enter up up enter");
-        assert_eq!(config(&view, cx).idle, Some(Duration::from_secs(60)));
+        keys(&mut settings_cx, "escape enter up up enter");
+        assert_eq!(
+            config(&view, cx).idle.map(IdleDelay::get),
+            Some(Duration::from_secs(60))
+        );
         assert!(config(&view, cx).saved_text().contains("idle_minutes = 1"));
 
         crate::app::tests::wait(cx, Duration::from_secs(60));
@@ -1018,29 +951,45 @@ mod tests {
         cx.update(|_, cx| assert!(!view.read(cx).is_blank()));
     }
 
-    #[test]
-    fn a_delay_set_by_hand_is_offered_too() {
-        let options = idle_options(Some(Duration::from_secs(6)));
-        assert_eq!(options.len(), IDLE_MINUTES.len() + 1);
-        assert_eq!(options[0], None);
-        assert_eq!(options[1], Some(Duration::from_secs(6)));
-        assert_eq!(idle_label(options[1]), "After 6 seconds");
-        assert_eq!(
-            idle_options(Some(Duration::from_secs(300))).len(),
-            IDLE_MINUTES.len(),
+    #[gpui_kit::test]
+    fn a_delay_set_by_hand_is_offered_too(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let open_list = |minutes, cx: &mut VisualTestContext| {
+            let delay = IdleDelay::from_minutes(minutes);
+            cx.update(|window, cx| view.update(cx, |this, cx| this.set_idle(delay, window, cx)));
+            let (_settings, mut settings_cx) = open_settings(&view, cx);
+            open_idle_list(&mut settings_cx);
+            settings_cx
+        };
+        let offers = |selector, cx: &mut VisualTestContext| cx.debug_bounds(selector).is_some();
+
+        let mut settings_cx = open_list(5., cx);
+        assert!(offers("omarchy-choice-option-7", &mut settings_cx));
+        assert!(
+            !offers("omarchy-choice-option-8", &mut settings_cx),
             "an offered delay isn't listed twice"
+        );
+        closing_keys("escape escape", &mut settings_cx);
+
+        let mut settings_cx = open_list(0.1, cx);
+        assert!(offers("omarchy-choice-option-8", &mut settings_cx));
+        keys(&mut settings_cx, "up enter");
+        assert_eq!(config(&view, cx).idle, None);
+        click("idle-choice", &mut settings_cx);
+        keys(&mut settings_cx, "down enter");
+        assert_eq!(
+            config(&view, cx).idle.map(IdleDelay::get),
+            Some(Duration::from_secs(6))
         );
     }
 
     #[test]
     fn delays_read_naturally() {
         assert_eq!(idle_label(None), "Never");
-        assert_eq!(idle_label(Some(Duration::from_secs(60))), "After 1 minute");
-        assert_eq!(
-            idle_label(Some(Duration::from_secs(120))),
-            "After 2 minutes"
-        );
-        assert_eq!(idle_label(Some(Duration::from_secs(3600))), "After 1 hour");
+        assert_eq!(idle_label(IdleDelay::from_minutes(0.1)), "After 6 seconds");
+        assert_eq!(idle_label(IdleDelay::from_minutes(1.)), "After 1 minute");
+        assert_eq!(idle_label(IdleDelay::from_minutes(2.)), "After 2 minutes");
+        assert_eq!(idle_label(IdleDelay::from_minutes(60.)), "After 1 hour");
     }
 
     fn texts(dir: &Path) -> Vec<String> {
@@ -1055,7 +1004,7 @@ mod tests {
 
         cx.simulate_input("typed just now");
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(new.path().to_owned()), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(new.path())), window, cx);
         });
         cx.run_until_parked();
 
@@ -1072,7 +1021,6 @@ mod tests {
                 .contains(new.path().to_str().unwrap())
         );
 
-        // What is typed next goes to the new folder.
         draw(cx);
         type_and_save(cx, "written here");
         assert_eq!(texts(new.path()), ["already there", "written here"]);
@@ -1084,13 +1032,13 @@ mod tests {
         let (default, view, cx) = open(cx);
         let other = tempfile::tempdir().unwrap();
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(other.path().to_owned()), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(other.path())), window, cx);
         });
         let (_settings, mut settings_cx) = open_settings(&view, cx);
         click("section-Notes", &mut settings_cx);
         click("default-folder", &mut settings_cx);
 
-        assert_eq!(config(&view, cx).notes_dir, default.path());
+        assert_eq!(&*config(&view, cx).notes_dir, default.path());
         assert!(!config(&view, cx).saved_text().contains("notes_dir"));
     }
 
@@ -1102,11 +1050,11 @@ mod tests {
         fs::write(&blocked, "").unwrap();
 
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(blocked.join("notes")), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(blocked.join("notes"))), window, cx);
         });
         cx.run_until_parked();
 
-        assert_eq!(config(&view, cx).notes_dir, dir.path());
+        assert_eq!(&*config(&view, cx).notes_dir, dir.path());
         assert!(!config(&view, cx).saved_text().contains("notes_dir"));
         cx.update(|_, cx| {
             let this = view.read(cx);
@@ -1118,20 +1066,20 @@ mod tests {
     #[gpui_kit::test]
     fn a_pending_question_cannot_act_on_the_new_folder(cx: &mut TestAppContext) {
         let (old, view, cx) = open(cx);
-        // The same file name in both trashes, which a question can't tell apart.
         let new = tempfile::tempdir().unwrap();
-        fs::create_dir_all(old.path().join(".trash")).unwrap();
-        fs::create_dir_all(new.path().join(".trash")).unwrap();
-        fs::write(old.path().join(".trash/same.md"), "old").unwrap();
-        fs::write(new.path().join(".trash/same.md"), "new").unwrap();
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever("same.md".into(), window, cx);
-        });
+        for dir in [&old, &new] {
+            fs::create_dir_all(dir.path().join(".trash")).unwrap();
+            fs::write(dir.path().join(".trash/same.md"), "same").unwrap();
+        }
+        keys(cx, "ctrl-shift-t");
+        click("delete-forever", cx);
+        assert!(cx.debug_bounds("confirm").is_some());
 
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(new.path().to_owned()), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(new.path())), window, cx);
         });
-        cx.update(|_, cx| assert!(!view.read(cx).has_question()));
+        keys(cx, "enter");
+        assert!(cx.debug_bounds("confirm").is_none());
         assert!(new.path().join(".trash/same.md").exists());
         assert!(old.path().join(".trash/same.md").exists());
     }
@@ -1151,7 +1099,7 @@ mod tests {
             Some(vec![path])
         });
         cx.run_until_parked();
-        assert_eq!(config(&view, cx).notes_dir, picked.path());
+        assert_eq!(&*config(&view, cx).notes_dir, picked.path());
     }
 
     #[gpui_kit::test]
@@ -1162,7 +1110,7 @@ mod tests {
         click("choose-folder", &mut settings_cx);
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
-        assert_eq!(config(&view, cx).notes_dir, dir.path());
+        assert_eq!(&*config(&view, cx).notes_dir, dir.path());
         cx.update(|_, cx| assert!(view.read(cx).settings_problem.is_none()));
     }
 

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Puts each past mistake in guards/ back, and checks that its guard fails and names the fix.
+
+    tools/prove-guards           every mistake
+    tools/prove-guards NAME...   only these, such as guards/false-credit.patch
+
+A file in guards/ starts with these lines, then has the patch that brings the mistake back.
+Run and Says come again for each other guard that has to catch it:
+
+    Mistake: where it happened and what it did
+    Run: the command that has to fail
+    Says: what its output has to hold
+
+It works on a copy of the tree in target/guards, so it never changes yours.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TREE = ROOT / "target/guards/tree"
+# A build folder of its own: cargo takes a binary built from another copy for a fresh one.
+ENV = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target/guards/build")}
+
+
+def copy_tree():
+    """Only what changed, so that cargo rebuilds only that."""
+    if not (TREE / ".git").exists():
+        shutil.rmtree(TREE, ignore_errors=True)
+        subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", ROOT, TREE], check=True)
+    listed = subprocess.run(["git", "ls-files", "-z", "-co", "--exclude-standard"], cwd=ROOT,
+                            check=True, capture_output=True, text=True).stdout
+    names = {name for name in listed.split("\0") if name and (ROOT / name).is_file()}
+    for name in names:
+        source, target = ROOT / name, TREE / name
+        if not target.is_file() or target.read_bytes() != source.read_bytes():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, target)
+    for path in [path for path in TREE.rglob("*") if path.is_file()]:
+        name = path.relative_to(TREE)
+        if name.parts[0] != ".git" and str(name) not in names:
+            path.unlink()
+
+
+def read_guard(path):
+    head, _, patch = path.read_text().partition("\n\n")
+    mistake = re.findall(r"^Mistake: (.+)$", head, re.M)
+    checks = re.findall(r"^Run: (.+)\nSays: (.+)$", head, re.M)
+    if len(mistake) != 1 or not checks:
+        sys.exit(f"{path}: needs a Mistake line, then Run and Says lines in pairs")
+    return mistake[0], checks, patch
+
+
+def run(command):
+    ran = subprocess.run(command, shell=True, cwd=TREE, env=ENV, text=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return ran.returncode, ran.stdout
+
+
+def apply(patch, *options):
+    subprocess.run(["git", "apply", *options], cwd=TREE, env=ENV, input=patch, text=True, check=True)
+
+
+def main():
+    paths = [Path(name).resolve() for name in sys.argv[1:]] or sorted((ROOT / "guards").glob("*.patch"))
+    guards = {path.stem: read_guard(path) for path in paths}
+    copy_tree()
+    broken = []
+    # A command that fails without the mistake would prove nothing by failing with it.
+    for command in sorted({command for _, checks, _ in guards.values() for command, _ in checks}):
+        status, output = run(command)
+        if status:
+            print(f"BROKEN without any mistake, this already fails: {command}\n{output[-2000:]}")
+            return 1
+    for name, (mistake, checks, patch) in guards.items():
+        started = time.monotonic()
+        try:
+            apply(patch)
+        except subprocess.CalledProcessError:
+            broken.append(name)
+            print(f"BROKEN {name}: the patch no longer applies. Bring the same mistake back in "
+                  "today's code, and keep it as the patch")
+            continue
+        try:
+            results = [(command, says, *run(command)) for command, says in checks]
+        finally:
+            apply(patch, "-R")
+        missed = [result for result in results if not result[2] or result[1] not in result[3]]
+        for command, says, status, output in missed:
+            why = f"failed without saying \"{says}\"" if status else "passed"
+            print(f"BROKEN {name}: `{command}` {why} with the mistake back\n{output[-2000:]}")
+        if missed:
+            broken.append(name)
+        else:
+            print(f"caught {name} in {time.monotonic() - started:.0f} s: {mistake}")
+    print(f"{'FAIL' if broken else 'PASS'} tools/prove-guards: {len(guards) - len(broken)} of {len(guards)} caught")
+    return 1 if broken else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

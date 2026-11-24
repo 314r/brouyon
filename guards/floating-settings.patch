@@ -1,0 +1,22 @@
+Mistake: 127ea7f made Settings a normal window on a Mac, its test still expected the floating one of Linux, and macOS CI went red
+Run: cargo test --locked --quiet --features mac-look own_app_id
+Says: it_floats_on_linux_and_has_its_own_app_id --- FAILED
+
+diff --git i/src/settings.rs w/src/settings.rs
+index 108b948..76e1e55 100644
+--- i/src/settings.rs
++++ w/src/settings.rs
+@@ -683,12 +683,7 @@ mod tests {
+     fn it_floats_on_linux_and_has_its_own_app_id(cx: &mut TestAppContext) {
+         let (_dir, view, cx) = open(cx);
+         let options = cx.update(|_, cx| window_options(view.read(cx).config(), cx));
+-        let kind = if MAC {
+-            WindowKind::Normal
+-        } else {
+-            WindowKind::Floating
+-        };
+-        assert_eq!(options.kind, kind);
++        assert_eq!(options.kind, WindowKind::Floating);
+         assert_eq!(options.app_id.as_deref(), Some("brouyon-settings"));
+     }
+ 
