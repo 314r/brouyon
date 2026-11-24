@@ -6,6 +6,7 @@
 //! and the rest only by the tests.
 
 use crate::{
+    checked::TextScale,
     config::{home_dir, xdg_dir},
     look::MAC,
     macos,
@@ -73,7 +74,7 @@ impl Transparency {
 pub struct Desktop {
     pub transparency: Transparency,
     /// How much larger than Omarchy's baseline the user set their desktop text.
-    pub text_scale: f32,
+    pub text_scale: TextScale,
     /// The monospace font, once it has changed since launch. Until then
     /// gpui-omarchy's choice is current, and it only looks once per process.
     pub font: Option<SharedString>,
@@ -87,7 +88,7 @@ impl Default for Desktop {
     fn default() -> Self {
         Self {
             transparency: Transparency::Opaque,
-            text_scale: 1.,
+            text_scale: TextScale::default(),
             font: None,
         }
     }
@@ -283,7 +284,7 @@ impl Paths {
 
     /// `[font] base-size` from the file `omarchy display text size` writes, then
     /// from the theme's own shell file.
-    fn text_scale(&self) -> f32 {
+    fn text_scale(&self) -> TextScale {
         [
             self.config.join("shell.toml"),
             self.theme().join("shell.toml"),
@@ -291,7 +292,7 @@ impl Paths {
         .iter()
         .filter_map(|path| fs::read_to_string(path).ok())
         .find_map(|contents| text_scale_from(&contents))
-        .unwrap_or(1.)
+        .unwrap_or_default()
     }
 
     fn folders(&self) -> [PathBuf; 5] {
@@ -305,14 +306,14 @@ impl Paths {
     }
 }
 
-fn text_scale_from(shell_toml: &str) -> Option<f32> {
+fn text_scale_from(shell_toml: &str) -> Option<TextScale> {
     let table: toml::Table = shell_toml.parse().ok()?;
     let font = table.get("font")?.as_table()?;
     let value = font.get("base-size")?;
     let size = value
         .as_float()
         .or_else(|| value.as_integer().map(|n| n as f64))? as f32;
-    (size > 0. && size.is_finite()).then_some(size / OMARCHY_BASELINE_FONT_SIZE)
+    TextScale::new(size / OMARCHY_BASELINE_FONT_SIZE)
 }
 
 #[cfg(test)]
@@ -400,23 +401,26 @@ mod tests {
     #[test]
     fn the_users_text_size_comes_before_the_themes() {
         let (_dir, paths) = omarchy();
-        assert_eq!(paths.text_scale(), 1.);
+        assert_eq!(paths.text_scale().get(), 1.);
 
         fs::write(paths.theme().join("shell.toml"), "[font]\nbase-size = 18").unwrap();
-        assert_eq!(paths.text_scale(), 1.5);
+        assert_eq!(paths.text_scale().get(), 1.5);
 
         fs::write(paths.config.join("shell.toml"), "[font]\nbase-size = 24").unwrap();
-        assert_eq!(paths.text_scale(), 2.);
+        assert_eq!(paths.text_scale().get(), 2.);
 
         fs::write(paths.config.join("shell.toml"), "[bar]\nsize = 3").unwrap();
-        assert_eq!(paths.text_scale(), 1.5, "no size there: the theme's");
+        assert_eq!(paths.text_scale().get(), 1.5, "no size there: the theme's");
     }
 
     #[test]
     fn text_scale_reads_the_shell_font_base_size() {
-        assert_eq!(text_scale_from("[font]\nbase-size = 16"), Some(16. / 12.));
         assert_eq!(
-            text_scale_from("[font]\nbase-size = 13.5"),
+            text_scale_from("[font]\nbase-size = 16").map(TextScale::get),
+            Some(16. / 12.)
+        );
+        assert_eq!(
+            text_scale_from("[font]\nbase-size = 13.5").map(TextScale::get),
             Some(13.5 / 12.)
         );
         assert_eq!(text_scale_from("[bar]\nsize = 3"), None);
@@ -512,7 +516,7 @@ mod tests {
 
         fs::write(paths.theme().join("shell.toml"), "[font]\nbase-size = 18").unwrap();
         wait_for_event(&events);
-        assert_eq!(paths.text_scale(), 1.5);
+        assert_eq!(paths.text_scale().get(), 1.5);
     }
 
     #[test]
@@ -525,7 +529,7 @@ mod tests {
 
         fs::rename(&temporary, paths.config.join("shell.toml")).unwrap();
         wait_for_event(&events);
-        assert_eq!(paths.text_scale(), 2.);
+        assert_eq!(paths.text_scale().get(), 2.);
     }
 
     #[test]

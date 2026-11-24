@@ -145,7 +145,7 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `ask_to_delete_forever` | Ask | `99050747308c` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
 | `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `26448ecfa9bb` |
-| `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `4a25b8dc7361` |
+| `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `d99638780c0e` |
 | `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `7ed04ac8791b` |
 | `src/app.rs` | `init` | Left out: it quits only when no window is open | `a8f178eebb98` |
 | `src/app.rs` | `open_filter` | Left out: it sets the text of Find, not of a note | `37f59b12cb50` |

@@ -2,7 +2,8 @@
 //! on to a blank note, and how all of that is drawn.
 
 use crate::{
-    config::{Config, CopyFormat, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
+    checked::{IdleDelay, NotesDir, TextPercent},
+    config::{Config, CopyFormat, ThemeMode},
     desktop::{self, Desktop},
     kept::{self, Kept, MayLeave, SaveState, Warned},
     lists,
@@ -32,7 +33,6 @@ use gpui_omarchy::{
 };
 use std::{
     io,
-    path::PathBuf,
     rc::Rc,
     time::{Duration, SystemTime},
 };
@@ -769,7 +769,7 @@ impl Brouyon {
             return;
         };
         self.idle_task = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(delay).await;
+            cx.background_executor().timer(delay.get()).await;
             this.update_in(cx, |this, window, cx| this.on_idle(window, cx))
                 .ok();
         }));
@@ -1225,14 +1225,14 @@ impl Brouyon {
         }
     }
 
-    pub fn set_text_percent(&mut self, percent: u32, cx: &mut Context<Self>) {
+    pub fn set_text_percent(&mut self, percent: TextPercent, cx: &mut Context<Self>) {
         let saved = self.config.set_text_percent(percent);
         self.report_setting(saved, cx);
     }
 
     pub fn set_idle(
         &mut self,
-        idle: Option<Duration>,
+        idle: Option<IdleDelay>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1248,7 +1248,7 @@ impl Brouyon {
     /// note is saved where it was begun, and existing notes don't move.
     pub fn set_notes_dir(
         &mut self,
-        dir: Option<PathBuf>,
+        dir: Option<NotesDir>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2038,13 +2038,13 @@ impl Render for Brouyon {
                     this.open_settings(window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &IncreaseTextSize, _, cx| {
-                    this.set_text_percent(this.config.text_percent + TEXT_PERCENT_STEP, cx);
+                    this.set_text_percent(this.config.text_percent.larger(), cx);
                 }))
                 .on_action(cx.listener(|this, _: &DecreaseTextSize, _, cx| {
-                    this.set_text_percent(this.config.text_percent - TEXT_PERCENT_STEP, cx);
+                    this.set_text_percent(this.config.text_percent.smaller(), cx);
                 }))
                 .on_action(cx.listener(|this, _: &ResetTextSize, _, cx| {
-                    this.set_text_percent(DEFAULT_TEXT_PERCENT, cx);
+                    this.set_text_percent(TextPercent::default(), cx);
                 }))
             })
             .child(
@@ -2241,7 +2241,7 @@ pub(crate) mod tests {
             apply_theme(ThemeMode::Omarchy, cx);
             macos::bind_editor_keys(cx);
         });
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(&NotesDir::new(dir.path())).unwrap();
         let config = Config::for_test(dir.path());
         let (view, cx) =
             cx.add_window_view(move |window, cx| Brouyon::new(store, config, window, cx));
@@ -4381,7 +4381,7 @@ pub(crate) mod tests {
         let other = tempfile::tempdir().unwrap();
         cx.update(|window, cx| {
             view.update(cx, |this, cx| {
-                this.set_notes_dir(Some(other.path().into()), window, cx)
+                this.set_notes_dir(Some(NotesDir::new(other.path())), window, cx)
             });
         });
         fs::write(other.path().join("there.md"), "there").unwrap();
@@ -4412,7 +4412,7 @@ pub(crate) mod tests {
         );
         fs::create_dir_all(&out).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(&NotesDir::new(dir.path())).unwrap();
         for (name, text) in [
             ("2026-11-06 09-40-00.md", SAMPLE),
             ("2026-11-05 18-00-00.md", "Idée pour plus tard\nsuite"),
@@ -4614,7 +4614,7 @@ pub(crate) mod tests {
         window
             .update(&mut cx, |this, _, cx| {
                 this.set_theme(ThemeMode::Dark, cx);
-                this.set_text_percent(200, cx);
+                this.set_text_percent(TextPercent::nearest(200), cx);
             })
             .unwrap();
         capture(&mut cx, any_window, &out.join("12-large-text.png"));
@@ -4629,13 +4629,15 @@ pub(crate) mod tests {
 
         let narrow_window = cx
             .open_window(size(px(500.), px(420.)), |window, cx| {
-                let store = Store::open(dir.path()).unwrap();
+                let store = Store::open(&NotesDir::new(dir.path())).unwrap();
                 cx.new(|cx| Brouyon::new(store, narrow_config, window, cx))
             })
             .unwrap();
         let narrow: AnyWindowHandle = narrow_window.into();
         window
-            .update(&mut cx, |this, _, cx| this.set_text_percent(100, cx))
+            .update(&mut cx, |this, _, cx| {
+                this.set_text_percent(TextPercent::nearest(100), cx)
+            })
             .unwrap();
         capture(&mut cx, narrow, &out.join("14-narrow.png"));
         narrow_window
@@ -4759,7 +4761,7 @@ pub(crate) mod tests {
             cx.global_mut::<Desktop>().transparency = Transparency::Opaque;
             Theme::tokyo_night().apply(cx);
         });
-        let readme_store = Store::open(readme_dir.path()).unwrap();
+        let readme_store = Store::open(&NotesDir::new(readme_dir.path())).unwrap();
         let mut readme_config = Config::for_test(readme_dir.path());
         readme_config.idle = None;
         let readme = cx

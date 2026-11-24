@@ -8,6 +8,7 @@ extern crate gpui_kit as gpui;
 
 mod app;
 mod assets;
+mod checked;
 mod config;
 mod desktop;
 mod kept;
@@ -117,6 +118,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use checked::NotesDir;
     use desktop::{Desktop, Transparency};
     use gpui_kit::{TestAppContext, WindowBackgroundAppearance};
     use std::fs;
@@ -159,10 +161,10 @@ mod tests {
         // A file where the chosen folder should be makes it impossible to open.
         let blocked = dir.path().join("blocked");
         fs::write(&blocked, "").unwrap();
-        config.notes_dir = blocked.join("notes");
+        config.notes_dir = NotesDir::new(blocked.join("notes"));
 
         let (_store, problem) = open_store(&mut config).unwrap();
-        assert_eq!(config.notes_dir, dir.path().join("default"));
+        assert_eq!(&*config.notes_dir, dir.path().join("default"));
         assert!(problem.unwrap().contains("Using the default folder"));
         assert!(config.saved_text().is_empty(), "the setting is left alone");
     }
@@ -173,7 +175,7 @@ mod tests {
         let mut config = Config::for_test(dir.path());
         let (_store, problem) = open_store(&mut config).unwrap();
         assert_eq!(problem, None);
-        assert_eq!(config.notes_dir, dir.path());
+        assert_eq!(&*config.notes_dir, dir.path());
     }
 
     #[test]
