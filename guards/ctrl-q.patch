@@ -1,32 +1,21 @@
 Mistake: before 25a48ef, Ctrl+Q dropped the text without a word when the save failed
+Run: cargo clippy --locked --quiet -- -D warnings
+Says: it leaves without saving the note
 Run: cargo test --locked --quiet shows_a_failed_save
 Says: quitting_shows_a_failed_save_before_it_lets_go --- FAILED
 Run: cargo test --locked --quiet shows_a_failed_save
 Says: quitting_from_settings_shows_a_failed_save_first --- FAILED
 
 diff --git i/src/app.rs w/src/app.rs
-index a60b56b..cd79755 100644
+index 4aec955..14f5e91 100644
 --- i/src/app.rs
 +++ w/src/app.rs
-@@ -1952,7 +1952,6 @@ impl Render for Brouyon {
-             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                 this.restart_idle_timer(window, cx);
-             }))
--            .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
-             .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close(window, cx)))
-             // The key that opens the shortcuts closes them too, but a question comes first.
-             .when(!questioning, |root| {
-diff --git i/src/settings.rs w/src/settings.rs
-index ac259fa..36958fd 100644
---- i/src/settings.rs
-+++ w/src/settings.rs
-@@ -541,9 +541,6 @@ impl Render for SettingsWindow {
-                 }
-             }))
-             .on_action(|_: &CloseSettings, window, _| window.remove_window())
--            .on_action(cx.listener(|this, _: &Quit, _, cx| {
--                this.app.update(cx, |app, cx| app.quit(cx));
--            }))
-             .child(sidebar)
-             .child(
-                 div()
+@@ -71,7 +71,7 @@ gpui_kit::actions!(
+ pub fn init(cx: &mut App) {
+     use gpui_kit::KeyBinding;
+     desktop::init(cx);
+-    cx.on_action(|_: &Quit, cx| cx.defer(ask_to_quit));
++    cx.on_action(|_: &Quit, cx| cx.quit());
+     // Scoped to the app's context: a binding with no context would outrank the
+     // editor's and the dialog's, so Escape would skip past an open question.
+     let context = Some(KEY_CONTEXT);

@@ -104,36 +104,48 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/store.rs` | `free_name` | FreeNames | `bd28d0617283` |
 | `src/store.rs` | `temp_name` | The assumption that nothing else uses the temporary file | `2a307189254f` |
 | `src/app.rs` | `follow_editor` | Type, Compose: which changes are looked at | `df636c56308d` |
-| `src/app.rs` | `on_editor_notify` | Type, Compose, SaveTimer | `7aa964cd3c2e` |
+| `src/app.rs` | `on_editor_notify` | Type, Compose, SaveTimer | `16f29149f73c` |
+| `src/kept.rs` | `changed` | Type, Compose | `e5bc3f163e30` |
+| `src/kept.rs` | `saved` | Saved, SavedNothing | `05faa017071c` |
+| `src/kept.rs` | `refused` | FlushFails | `3b549d5d5ec4` |
+| `src/kept.rs` | `kept` | Flush, RefreshOpenNote | `69b80948ca32` |
+| `src/kept.rs` | `warned` | Quit | `85e2230cc164` |
+| `src/kept.rs` | `may_leave` | Quit | `2d2cda7f9e61` |
+| `src/kept.rs` | `may_leave_anyway` | Quit | `02178f2091af` |
+| `src/kept.rs` | `quit` | Quit | `d932277ee750` |
+| `src/kept.rs` | `close` | Quit | `2cf5cc25e8bf` |
+| `src/kept.rs` | `quit_without_windows` | Left out: it quits only when no window is open | `a0e0b218ef71` |
+| `src/kept.rs` | `close_textless` | Left out: it closes Settings | `cbda49437f0b` |
 | `src/app.rs` | `on_editor_event` | Type | `be9c651e2b04` |
 | `src/app.rs` | `edit_list` | Type | `d0a27a483246` |
-| `src/app.rs` | `flush` | Flush, Flushed, FlushFails | `3c92f5148a7b` |
+| `src/app.rs` | `flush` | Flush, Flushed, FlushFails | `0abe040400da` |
 | `src/app.rs` | `record_save` | Saved, SavedNothing, CreateRename | `0d5ef02c6b2e` |
-| `src/app.rs` | `select` | Select, Flushed | `672325750f13` |
-| `src/app.rs` | `open` | Open | `9b1320727ff6` |
+| `src/app.rs` | `select` | Select, Flushed | `17119680eb90` |
+| `src/app.rs` | `open` | Open | `bbedcfb5c190` |
 | `src/app.rs` | `replace_editor` | Open | `a27183e2caf5` |
-| `src/app.rs` | `on_idle` | IdleMove | `89b70e8f72cb` |
+| `src/app.rs` | `on_idle` | IdleMove | `e6abeea85f3d` |
 | `src/app.rs` | `on_activation` | LoseFocus, Sync | `d337ffe4d03f` |
 | `src/app.rs` | `loaded_now` | Open, RefreshNote | `839318b7a1a9` |
 | `src/app.rs` | `sync_with_disk` | Sync | `99f6dd0ecf09` |
 | `src/app.rs` | `watch_notes` | Sync | `be87c15597b6` |
-| `src/app.rs` | `refresh_open_note` | RefreshOpenNote, RefreshNote | `fae9e1366620` |
-| `src/app.rs` | `show_in_place` | ShowInPlace | `7531d548e9ec` |
-| `src/app.rs` | `may_leave` | Quit, FlushFails | `b42fa02dbe8a` |
-| `src/app.rs` | `quit` | Quit | `64d59aa6d7f8` |
-| `src/app.rs` | `close` | Quit | `e616df4acd31` |
-| `src/app.rs` | `on_close` | Quit | `920b3be16fca` |
-| `src/app.rs` | `step` | Select | `f0d3c1f1330b` |
-| `src/app.rs` | `move_to_trash` | MoveToTrash, Flushed, TrashPick, TrashRename | `1e531f13bf1f` |
+| `src/app.rs` | `refresh_open_note` | RefreshOpenNote, RefreshNote | `d11ba63e9cb7` |
+| `src/app.rs` | `show_in_place` | ShowInPlace | `f0c5ce121cac` |
+| `src/app.rs` | `may_leave` | Quit, FlushFails | `cde3598f99a4` |
+| `src/app.rs` | `ask_to_quit` | Quit | `5c63262aced4` |
+| `src/app.rs` | `quit` | Quit | `9bf55810ea6d` |
+| `src/app.rs` | `close` | Quit | `d5edd27afc85` |
+| `src/app.rs` | `on_close` | Quit | `21aa9964281f` |
+| `src/app.rs` | `step` | Select | `999d32eff226` |
+| `src/app.rs` | `move_to_trash` | MoveToTrash, Flushed, TrashPick, TrashRename | `f08dcc893178` |
 | `src/app.rs` | `show_notes` | ShowNotes | `dd56528f935d` |
-| `src/app.rs` | `show_trash` | ShowTrash, Flushed | `f2ce0b854d8f` |
-| `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `7f936f42f200` |
-| `src/app.rs` | `restore` | Restore, RestoreRename | `554ca4f2e0a2` |
+| `src/app.rs` | `show_trash` | ShowTrash, Flushed | `777c73bc1331` |
+| `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `a92ad4a6aa96` |
+| `src/app.rs` | `restore` | Restore, RestoreRename | `79882eef2106` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
-| `src/app.rs` | `answer` | Cancel, Confirm | `443ed2302337` |
-| `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `7d43a2211541` |
-| `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `353076a5da2d` |
-| `src/app.rs` | `init` | Left out: it quits only when no window is open | `8fe60db7fdbf` |
+| `src/app.rs` | `answer` | Cancel, Confirm | `93e3c4b85d1f` |
+| `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `4a25b8dc7361` |
+| `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `c7bc29f10fbe` |
+| `src/app.rs` | `init` | Left out: it quits only when no window is open | `a8f178eebb98` |
 | `src/app.rs` | `open_filter` | Left out: it sets the text of Find, not of a note | `1f69ec800e54` |
 | `src/app.rs` | `reload_lists` | Left out: it fills the lists, and the model has none | `9735f25930f9` |
 | `Cargo.lock` | `gpui-base 0.9.0` | Type, Compose, Unmark and ShowInPlace: every edit of the text notifies, which `on_editor_notify` relies on | |

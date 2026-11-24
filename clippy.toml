@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "gpui::App::quit", reason = "it leaves without saving the note. Dispatch the Quit action, or call MayLeave::quit, which takes what Brouyon::flush gives" },
+    { path = "gpui::Window::remove_window", reason = "it closes without saving the note. Call MayLeave::close, which takes what Brouyon::flush gives, or kept::close_textless for a window that holds no note" },
+]
