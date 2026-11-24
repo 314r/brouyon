@@ -3,11 +3,11 @@ Run: tools/lint
 Says: none of its paths says
 
 diff --git i/src/watch.rs w/src/watch.rs
-index 2bb4f51..5d9958a 100644
+index dad0d98..50c784c 100644
 --- i/src/watch.rs
 +++ w/src/watch.rs
-@@ -7,7 +7,7 @@ use std::{
-     path::{Path, PathBuf},
+@@ -8,7 +8,7 @@ use std::{
+     time::SystemTime,
  };
  
 -/// Adapted from gpui-omarchy's palette watcher, which is private to that crate.
