@@ -339,9 +339,8 @@ pub struct Brouyon {
     /// The field above the list. What it holds only counts while it is open.
     filter: Entity<InputState>,
     filter_open: bool,
-    /// The words a note has to hold to be listed, from [`store::terms`]. None lists
-    /// every note.
-    filter_terms: Vec<String>,
+    /// What the list was last narrowed down to, to start again from its top when it changes.
+    listed_for: Vec<String>,
     save_state: SaveState,
     /// `None` for a blank note and in the Trash, which have no file to save to.
     loaded: Option<Loaded>,
@@ -405,7 +404,7 @@ impl Brouyon {
             seen: SharedString::default(),
             filter,
             filter_open: false,
-            filter_terms: Vec::new(),
+            listed_for: Vec::new(),
             save_state: SaveState::default(),
             loaded: None,
             problem: None,
@@ -520,20 +519,15 @@ impl Brouyon {
         cx: &mut Context<Self>,
     ) {
         match event {
-            InputEvent::Change => {
-                self.filter_terms = store::terms(&self.filter.read(cx).value());
-                self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                cx.notify();
-            }
             // Enter opens the first note found. With nothing to find, it goes back
             // to the note.
-            InputEvent::PressEnter { .. } if self.filter_terms.is_empty() => {
+            InputEvent::PressEnter { .. } if self.terms(cx).is_empty() => {
                 self.close_filter();
                 self.focus_content(window, cx);
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => {
-                if let Some(first) = self.rows().into_iter().next() {
+                if let Some(first) = self.rows(cx).into_iter().next() {
                     self.select(first, window, cx);
                 }
             }
@@ -544,13 +538,10 @@ impl Brouyon {
     /// Shows the field that narrows the list down, empty, and puts the cursor in it.
     /// Already shown, its text is selected, ready to be typed over.
     fn open_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.filter_open {
-            self.filter_open = true;
-            self.filter_terms.clear();
-        }
-        let terms_kept = !self.filter_terms.is_empty();
+        let nothing_kept = self.terms(cx).is_empty();
+        self.filter_open = true;
         self.filter.update(cx, |state, cx| {
-            if !terms_kept {
+            if nothing_kept {
                 state.set_value("", window, cx);
             }
             state.focus(window, cx);
@@ -562,7 +553,14 @@ impl Brouyon {
     /// Lists every note again. Whoever calls this decides where the keyboard goes.
     fn close_filter(&mut self) {
         self.filter_open = false;
-        self.filter_terms.clear();
+    }
+
+    /// The words a note has to hold to be listed. None lists every note.
+    fn terms(&self, cx: &App) -> Vec<String> {
+        if !self.filter_open {
+            return Vec::new();
+        }
+        store::terms(&self.filter.read(cx).value())
     }
 
     /// Makes the edit `edit` finds for the text and the cursor, if any. It goes
@@ -685,7 +683,7 @@ impl Brouyon {
             modified,
         });
         if kept_both || previous_row != Some(0) {
-            self.reveal_selection();
+            self.reveal_selection(cx);
         }
     }
 
@@ -765,7 +763,7 @@ impl Brouyon {
         self.copied_task = None;
         self.copy_menu_open = false;
         self.replace_editor(&text, readonly, window, cx);
-        self.reveal_selection();
+        self.reveal_selection(cx);
         self.restart_idle_timer(window, cx);
         cx.notify();
     }
@@ -947,15 +945,16 @@ impl Brouyon {
     /// The rows of the list being shown, top to bottom: the notes or the trash,
     /// narrowed down to what is being looked for. A blank note has a row of its own
     /// above the notes, unless something is being looked for.
-    fn rows(&self) -> Vec<Selection> {
-        let found = |note: &&Note| note.matches(&self.filter_terms);
+    fn rows(&self, cx: &App) -> Vec<Selection> {
+        let terms = self.terms(cx);
+        let found = |note: &&Note| note.matches(&terms);
         if self.selection.in_trash() {
             let trash = self.trash.iter().filter(found);
             trash
                 .map(|note| Selection::Trashed(note.id.clone()))
                 .collect()
         } else {
-            let blank = self.selection == Selection::Blank && self.filter_terms.is_empty();
+            let blank = self.selection == Selection::Blank && terms.is_empty();
             let notes = self.notes.iter().filter(found);
             blank
                 .then_some(Selection::Blank)
@@ -965,12 +964,12 @@ impl Brouyon {
         }
     }
 
-    fn selected_row(&self) -> Option<usize> {
-        self.rows().iter().position(|row| *row == self.selection)
+    fn selected_row(&self, cx: &App) -> Option<usize> {
+        self.rows(cx).iter().position(|row| *row == self.selection)
     }
 
-    fn reveal_selection(&self) {
-        if let Some(row) = self.selected_row() {
+    fn reveal_selection(&self, cx: &App) {
+        if let Some(row) = self.selected_row(cx) {
             self.list_scroll
                 .scroll_to_item(row, ScrollStrategy::Nearest);
         }
@@ -982,8 +981,8 @@ impl Brouyon {
         if self.flush(cx).is_none() {
             return;
         }
-        let rows = self.rows();
-        let target = match (self.selected_row(), down) {
+        let rows = self.rows(cx);
+        let target = match (self.selected_row(cx), down) {
             (Some(row), true) => row + 1,
             (None, true) => 0,
             (Some(0), false) => {
@@ -1070,10 +1069,10 @@ impl Brouyon {
     /// Once a note has left the trash: the first one still listed, or the notes.
     /// When none of what was looked for is left, the whole trash is listed again.
     fn show_next_trashed(&mut self, kept: Kept, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rows().is_empty() {
+        if self.rows(cx).is_empty() {
             self.close_filter();
         }
-        match self.rows().into_iter().next() {
+        match self.rows(cx).into_iter().next() {
             Some(next) => self.open(next, kept, window, cx),
             None => self.show_notes(window, cx),
         }
@@ -1386,8 +1385,15 @@ impl Brouyon {
         });
 
         let row_height = rems(3.25).to_pixels(window.rem_size());
-        let rows = Rc::new(self.rows());
-        let nothing_found = rows.is_empty() && !self.filter_terms.is_empty();
+        let rows = Rc::new(self.rows(cx));
+        let terms = self.terms(cx);
+        let nothing_found = rows.is_empty() && !terms.is_empty();
+        if terms != self.listed_for {
+            if !terms.is_empty() {
+                self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
+            }
+            self.listed_for = terms;
+        }
         let count = rows.len();
         let sizes = Rc::new(
             (0..count)
@@ -1511,7 +1517,7 @@ impl Brouyon {
             Some(note) => (
                 note.title.clone().into(),
                 format_date(note.modified, chrono::Local::now()).into(),
-                note.found_line(&self.filter_terms)
+                note.found_line(&self.terms(cx))
                     .unwrap_or_else(|| note.preview.clone())
                     .into(),
             ),
@@ -3341,7 +3347,7 @@ pub(crate) mod tests {
                 let note = notes.iter().find(|note| note.id == *id).unwrap();
                 note.title.clone()
             };
-            this.rows()
+            this.rows(cx)
                 .iter()
                 .map(|row| match row {
                     Selection::Blank => "New note".to_string(),
@@ -3365,6 +3371,45 @@ pub(crate) mod tests {
         cx.simulate_input(words);
         cx.run_until_parked();
         draw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn leaving_find_shows_the_note_gone_back_to(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".trash")).unwrap();
+        fs::write(dir.path().join(".trash/z.md"), "trashed").unwrap();
+        for n in 0..60 {
+            fs::write(dir.path().join(format!("{n:02}.md")), format!("note {n}")).unwrap();
+        }
+        let (_dir, view, cx) = open_with(cx, dir);
+        let last = cx.update(|_, cx| view.read(cx).rows(cx).last().cloned().unwrap());
+        view.update_in(cx, |this, window, cx| this.select(last, window, cx));
+        draw(cx);
+        keys(cx, "ctrl-shift-t");
+        find(cx, "trashed");
+        keys(cx, "ctrl-shift-t");
+        draw(cx);
+        let row = cx.update(|_, cx| view.read(cx).selected_row(cx).unwrap());
+        let shown = cx.debug_bounds(format!("note-row-{row}").leak());
+        assert!(shown.is_some(), "row {row} is out of sight");
+    }
+
+    #[gpui_kit::test]
+    fn finding_follows_what_an_input_method_composes(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open_with_notes_to_find(cx);
+        keys(cx, "ctrl-f");
+        cx.update(|window, cx| {
+            let filter = view.read(cx).filter.clone();
+            filter.update(cx, |state, cx| {
+                state.replace_and_mark_text_in_range(None, "tap", None, window, cx);
+                state.unmark_text(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        draw(cx);
+        assert_eq!(listed(&view, cx), ["Plumber", "Groceries"]);
+        keys(cx, "enter");
+        assert_eq!(selection(&view, cx), Selection::Note("a.md".into()));
     }
 
     #[gpui_kit::test]
@@ -3565,7 +3610,7 @@ pub(crate) mod tests {
             cx.update(|_, cx| {
                 let this = view.read(cx);
                 let note = this.notes.iter().find(|note| note.id == id).unwrap();
-                note.found_line(&this.filter_terms)
+                note.found_line(&this.terms(cx))
             })
         };
         find(cx, "water");
@@ -4472,7 +4517,6 @@ pub(crate) mod tests {
                 this.open_filter(window, cx);
                 this.filter
                     .update(cx, |state, cx| state.set_value(words, window, cx));
-                this.filter_terms = store::terms(words);
             };
         window
             .update(&mut cx, |this, window, cx| {
