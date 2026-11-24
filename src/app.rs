@@ -1124,12 +1124,7 @@ impl Brouyon {
     }
 
     /// Asks about the note on screen, with the text it shows.
-    pub fn ask_to_delete_forever(
-        &mut self,
-        id: NoteId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn ask_to_delete_forever(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
         self.ask(Confirm::DeleteForever(id, self.seen.clone()), window, cx);
     }
 
@@ -1481,7 +1476,13 @@ impl Brouyon {
             .border_color(t.divider())
             .child(header)
             .children(filter)
-            .child(div().flex_1().min_h_0().child(list))
+            .child(
+                div()
+                    .debug_selector(|| "note-list".into())
+                    .flex_1()
+                    .min_h_0()
+                    .child(list),
+            )
             .child(footer)
     }
 
@@ -1565,6 +1566,7 @@ impl Brouyon {
             // Empty, it keeps its line, so a title sits at the same height in every row.
             .child(
                 div()
+                    .debug_selector(|| format!("note-row-{row}-{preview}"))
                     .truncate()
                     .text_size(rems(0.6875))
                     .text_color(colors.detail)
@@ -1629,8 +1631,13 @@ impl Brouyon {
         let t = cx.omarchy().clone();
         let problem = self.problem.as_ref().or(self.settings_problem.as_ref());
         let status = match (problem, &self.notice, self.copied, &self.selection) {
-            (Some(problem), ..) => div().text_color(t.danger).child(problem.clone()),
-            (None, Some(notice), ..) => div().child(notice.clone()),
+            (Some(problem), ..) => div()
+                .debug_selector(|| "status-problem".into())
+                .text_color(t.danger)
+                .child(problem.clone()),
+            (None, Some(notice), ..) => div()
+                .debug_selector(|| "status-notice".into())
+                .child(notice.clone()),
             (None, None, Some(format), _) => div().child(format!("Copied as {}", format.label())),
             (None, None, None, Selection::Note(_)) => match &self.loaded {
                 Some(loaded) => div().child(format!(
@@ -1663,6 +1670,7 @@ impl Brouyon {
                             button("restore", "Restore", ButtonVariant::Secondary, cx),
                             window,
                         )
+                        .debug_selector(|| "restore".into())
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.restore(restore.clone(), window, cx);
@@ -1679,6 +1687,7 @@ impl Brouyon {
                             ),
                             window,
                         )
+                        .debug_selector(|| "delete-forever".into())
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.ask_to_delete_forever(id.clone(), window, cx);
@@ -1865,6 +1874,7 @@ impl Brouyon {
                             .gap(rems(0.5))
                             .child(
                                 dialog_button("cancel", "Cancel", ButtonVariant::Secondary, cx)
+                                    .debug_selector(|| "cancel".into())
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(gpui_kit::base::actions::Cancel),
@@ -1874,6 +1884,7 @@ impl Brouyon {
                             )
                             .child(
                                 dialog_button("confirm", label, ButtonVariant::Danger, cx)
+                                    .debug_selector(|| "confirm".into())
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(gpui_kit::base::actions::Confirm {
@@ -2199,10 +2210,6 @@ impl Brouyon {
         self.notes.iter().map(|note| note.title.clone()).collect()
     }
 
-    pub fn has_question(&self) -> bool {
-        self.confirm.is_some()
-    }
-
     pub fn has_problem(&self) -> bool {
         self.problem.is_some()
     }
@@ -2214,8 +2221,7 @@ pub(crate) mod tests {
     use crate::desktop::Transparency;
     use chrono::TimeZone;
     use gpui_kit::{
-        EntityInputHandler, Focusable, Modifiers, TestAppContext, VisualTestContext, base::actions,
-        point, px,
+        EntityInputHandler, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
     };
     use std::{
         fs::{self, File},
@@ -2454,7 +2460,11 @@ pub(crate) mod tests {
             apply_theme(ThemeMode::Omarchy, cx);
         });
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(cx.omarchy().font, cx.omarchy().mono_font));
+        let mono = Theme::tokyo_night().mono_font;
+        cx.update(|cx| {
+            assert_eq!(cx.omarchy().font, mono);
+            assert_eq!(cx.omarchy().mono_font, mono);
+        });
     }
 
     #[gpui_kit::test]
@@ -2577,39 +2587,47 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn notes_are_spaced_and_set_in_as_the_look_has_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("a.md"), "aaa").unwrap();
-        fs::write(dir.path().join("b.md"), "bbb").unwrap();
+        for n in 1..=60 {
+            fs::write(dir.path().join(format!("{n}.md")), "a note").unwrap();
+        }
         let (_dir, _view, cx) = open_with(cx, dir);
-        let rem = cx.update(|window, _| window.rem_size());
+        let list = cx.debug_bounds("note-list").unwrap();
         let (first, second) = (
             cx.debug_bounds("note-row-0").unwrap(),
             cx.debug_bounds("note-row-1").unwrap(),
         );
+        cx.simulate_event(ScrollEvent {
+            position: list.center(),
+            delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+            ..Default::default()
+        });
+        draw(cx);
+        let last = cx.debug_bounds("note-row-60").unwrap();
+
+        let spaced = |space: Pixels| match MAC {
+            true => space > px(0.),
+            false => space.abs() < px(0.5),
+        };
         let gap = second.top() - first.bottom();
-        assert!(
-            (gap - rems(ROW_GAP).to_pixels(rem)).abs() < px(0.5),
-            "{gap:?}"
-        );
-        assert_eq!(first.left(), rems(ROW_INSET).to_pixels(rem));
-        assert_eq!(
-            row_spacing(0, 2).0,
-            ROW_GAP / 2. + LIST_END,
-            "room above the first"
-        );
-        assert_eq!(
-            row_spacing(1, 2).1,
-            ROW_GAP / 2. + LIST_END,
-            "and below the last"
-        );
+        let above = first.top() - list.top();
+        let below = list.bottom() - last.bottom();
+        assert!(spaced(gap), "{gap:?} between two");
+        assert!(spaced(first.left()), "{:?} at the side", first.left());
+        assert!(spaced(above - gap), "{above:?} above the first");
+        assert!(spaced(below - gap), "{below:?} below the last");
     }
 
     /// A test window has no AppKit window to ask, so GPUI's answer stands.
     #[gpui_kit::test]
     fn without_appkit_the_window_is_in_front_when_gpui_says_so(cx: &mut TestAppContext) {
         let (_dir, _view, cx) = open(cx);
-        cx.update(|window, _| {
-            assert_eq!(macos::is_key_window(window), window.is_window_active());
-        });
+        let in_front =
+            |cx: &mut VisualTestContext| cx.update(|window, _| macos::is_key_window(window));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(in_front(cx));
+        cx.deactivate_window();
+        assert!(!in_front(cx));
     }
 
     /// The editor's scrollbar runs along its right edge, which is the window's.
@@ -2690,24 +2708,28 @@ pub(crate) mod tests {
             file.set_modified(date).unwrap();
             date
         };
-        let date = dated("one\r\n\ttwo  \n\n", 1);
+        let mut date = dated("one\r\n\ttwo  \n\n", 1);
         let (_dir, view, cx) = open_with(cx, dir);
-        let look = |cx: &mut VisualTestContext| {
-            keys(cx, "right shift-down");
-            assert!(cx.update(|_, cx| view.read(cx).save_state.kept().is_some()));
-            wait(cx, SAVE_DELAY);
-            cx.update(|window, cx| view.update(cx, |this, cx| this.on_idle(window, cx)));
+        let date_once_left = |cx: &mut VisualTestContext| {
+            wait(cx, IDLE);
+            assert_eq!(selection(&view, cx), Selection::Blank);
             fs::metadata(&path).unwrap().modified().unwrap()
         };
         keys(cx, "alt-down");
         assert_eq!(editor_text(&view, cx), "one\r\n\ttwo  \n\n");
-        assert_eq!(look(cx), date);
+        keys(cx, "right shift-down");
+        assert_eq!(date_once_left(cx), date);
 
+        // With text waiting to be saved, the change wouldn't show yet.
         keys(cx, "alt-down");
-        let date = dated("three\r\n", 2);
-        notice_changes(&view, cx);
-        assert_eq!(editor_text(&view, cx), "three\r\n");
-        assert_eq!(look(cx), date);
+        for (text, seconds) in [("three\r\n", 2), ("four\r\n", 3)] {
+            keys(cx, "right shift-down");
+            date = dated(text, seconds);
+            notice_changes(&view, cx);
+            assert_eq!(editor_text(&view, cx), text);
+        }
+        keys(cx, "right shift-down");
+        assert_eq!(date_once_left(cx), date);
     }
 
     #[gpui_kit::test]
@@ -2751,16 +2773,10 @@ pub(crate) mod tests {
         assert_eq!(trashed_texts(dir.path()), ["keep me"]);
 
         keys(cx, "ctrl-shift-t");
-        let trashed = selection(&view, cx);
-        assert!(matches!(trashed, Selection::Trashed(_)));
+        assert!(selection(&view, cx).in_trash());
         assert_eq!(editor_text(&view, cx), "keep me");
-        cx.update(|_, cx| assert!(!view.read(cx).editor.read(cx).is_editable()));
 
-        let Selection::Trashed(id) = trashed else {
-            unreachable!()
-        };
-        view.update_in(cx, |this, window, cx| this.restore(id, window, cx));
-        cx.run_until_parked();
+        click("restore", cx);
         assert!(matches!(selection(&view, cx), Selection::Note(_)));
         assert_eq!(note_texts(dir.path()), ["keep me"]);
         assert!(trashed_texts(dir.path()).is_empty());
@@ -3001,8 +3017,7 @@ pub(crate) mod tests {
         keys(cx, "alt-down");
         click("trash-tab", cx);
         click("empty-trash", cx);
-        cx.dispatch_action(actions::Confirm { secondary: false });
-        cx.run_until_parked();
+        click("confirm", cx);
         assert_eq!(selection(&view, cx), Selection::Note("a.md".into()));
     }
 
@@ -3032,76 +3047,69 @@ pub(crate) mod tests {
         (dir, view, cx, id)
     }
 
+    fn question_is_open(cx: &mut VisualTestContext) -> bool {
+        cx.debug_bounds("confirm").is_some()
+    }
+
     #[gpui_kit::test]
     fn deleting_forever_asks_first_and_cancel_keeps_the_note(cx: &mut TestAppContext) {
-        let (dir, view, cx, id) = with_one_trashed_note(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever(id, window, cx);
-        });
-        draw(cx);
+        let (dir, view, cx, _) = with_one_trashed_note(cx);
+        click("delete-forever", cx);
+        assert!(question_is_open(cx));
 
         // Escape answers the dialog rather than also leaving the trash.
         keys(cx, "escape");
-        cx.update(|_, cx| assert!(view.read(cx).confirm.is_none()));
+        assert!(!question_is_open(cx));
+        assert!(selection(&view, cx).in_trash());
+
+        click("delete-forever", cx);
+        click("cancel", cx);
+        assert!(!question_is_open(cx));
         assert!(selection(&view, cx).in_trash());
         assert_eq!(trashed_texts(dir.path()), ["trashed"]);
     }
 
     #[gpui_kit::test]
     fn app_shortcuts_are_ignored_while_a_question_is_open(cx: &mut TestAppContext) {
-        let (dir, view, cx, id) = with_one_trashed_note(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever(id, window, cx);
-        });
-        draw(cx);
+        let (dir, view, cx, _) = with_one_trashed_note(cx);
+        click("delete-forever", cx);
         keys(cx, "ctrl-n");
         keys(cx, "ctrl-shift-t");
         assert!(selection(&view, cx).in_trash());
-        cx.update(|_, cx| assert!(view.read(cx).confirm.is_some()));
+        assert!(question_is_open(cx));
         assert_eq!(trashed_texts(dir.path()), ["trashed"]);
     }
 
     #[gpui_kit::test]
     fn confirming_delete_forever_removes_the_file(cx: &mut TestAppContext) {
-        let (dir, view, cx, id) = with_one_trashed_note(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever(id, window, cx);
-        });
-        draw(cx);
-        cx.dispatch_action(actions::Confirm { secondary: false });
-        cx.run_until_parked();
+        let (dir, view, cx, _) = with_one_trashed_note(cx);
+        click("delete-forever", cx);
+        click("confirm", cx);
         assert!(trashed_texts(dir.path()).is_empty());
         assert_eq!(selection(&view, cx), Selection::Blank, "back on the notes");
     }
 
     #[gpui_kit::test]
     fn empty_trash_removes_only_trashed_notes(cx: &mut TestAppContext) {
-        let (dir, view, cx) = open(cx);
+        let (dir, _view, cx) = open(cx);
         type_and_save(cx, "kept");
         keys(cx, "ctrl-n");
         type_and_save(cx, "binned");
         keys(cx, "ctrl-shift-backspace");
         keys(cx, "ctrl-shift-t");
-        view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::EmptyTrash, window, cx);
-        });
-        draw(cx);
-        cx.dispatch_action(actions::Confirm { secondary: false });
-        cx.run_until_parked();
+        click("empty-trash", cx);
+        click("confirm", cx);
         assert!(trashed_texts(dir.path()).is_empty());
         assert_eq!(note_texts(dir.path()), ["kept"]);
     }
 
     #[gpui_kit::test]
     fn the_idle_move_waits_for_an_open_question(cx: &mut TestAppContext) {
-        let (_dir, view, cx, id) = with_one_trashed_note(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever(id, window, cx);
-        });
-        draw(cx);
+        let (_dir, view, cx, _) = with_one_trashed_note(cx);
+        click("delete-forever", cx);
         wait(cx, IDLE * 2);
         assert!(selection(&view, cx).in_trash());
-        cx.update(|_, cx| assert!(view.read(cx).confirm.is_some()));
+        assert!(question_is_open(cx));
     }
 
     fn shortcuts_open(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> bool {
@@ -3157,14 +3165,11 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn the_shortcuts_key_leaves_an_open_question_alone(cx: &mut TestAppContext) {
-        let (_dir, view, cx, id) = with_one_trashed_note(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever(id, window, cx);
-        });
-        draw(cx);
+        let (_dir, view, cx, _) = with_one_trashed_note(cx);
+        click("delete-forever", cx);
         keys(cx, "f1");
         assert!(!shortcuts_open(&view, cx));
-        cx.update(|_, cx| assert!(view.read(cx).confirm.is_some()));
+        assert!(question_is_open(cx));
     }
 
     #[gpui_kit::test]
@@ -3370,17 +3375,15 @@ pub(crate) mod tests {
         for n in 0..60 {
             fs::write(dir.path().join(format!("{n:02}.md")), format!("note {n}")).unwrap();
         }
-        let (_dir, view, cx) = open_with(cx, dir);
-        let last = cx.update(|_, cx| view.read(cx).rows(cx).last().cloned().unwrap());
-        view.update_in(cx, |this, window, cx| this.select(last, window, cx));
-        draw(cx);
+        let (_dir, _view, cx) = open_with(cx, dir);
+        assert!(cx.debug_bounds("note-row-59").is_none());
+        keys(cx, &["alt-down"; 60].join(" "));
         keys(cx, "ctrl-shift-t");
         find(cx, "trashed");
         keys(cx, "ctrl-shift-t");
         draw(cx);
-        let row = cx.update(|_, cx| view.read(cx).selected_row(cx).unwrap());
-        let shown = cx.debug_bounds(format!("note-row-{row}").leak());
-        assert!(shown.is_some(), "row {row} is out of sight");
+        let last = cx.debug_bounds("note-row-59");
+        assert!(last.is_some(), "the note gone back to is out of sight");
     }
 
     #[gpui_kit::test]
@@ -3579,13 +3582,8 @@ pub(crate) mod tests {
         click("trash-tab", cx);
         find(cx, "shopping");
         keys(cx, "enter");
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever("e.md".into(), window, cx);
-        });
-        draw(cx);
-        cx.dispatch_action(actions::Confirm { secondary: false });
-        cx.run_until_parked();
-        draw(cx);
+        click("delete-forever", cx);
+        click("confirm", cx);
 
         assert_eq!(trashed_texts(dir.path()), ["Old plumber quote"]);
         assert_eq!(selection(&view, cx), Selection::Trashed("d.md".into()));
@@ -3594,25 +3592,16 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn a_found_note_shows_the_line_it_was_found_on(cx: &mut TestAppContext) {
-        let (_dir, view, cx) = open_with_notes_to_find(cx);
-        let line = |cx: &mut VisualTestContext, id: &str| {
-            cx.update(|_, cx| {
-                let this = view.read(cx);
-                let note = this.notes.iter().find(|note| note.id == id).unwrap();
-                note.found_line(&this.terms(cx))
-            })
-        };
+        let (_dir, _view, cx) = open_with_notes_to_find(cx);
+        assert!(cx.debug_bounds("note-row-2-milk").is_some());
         find(cx, "water");
-        assert_eq!(line(cx, "b.md").as_deref(), Some("tap water"));
+        assert!(cx.debug_bounds("note-row-0-tap water").is_some());
     }
 
     #[gpui_kit::test]
     fn finding_waits_for_an_open_question(cx: &mut TestAppContext) {
-        let (_dir, view, cx, id) = with_one_trashed_note(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever(id, window, cx);
-        });
-        draw(cx);
+        let (_dir, view, cx, _) = with_one_trashed_note(cx);
+        click("delete-forever", cx);
         keys(cx, "ctrl-f");
         assert!(!filter_is_open(&view, cx));
     }
@@ -3822,13 +3811,16 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn copying_waits_for_an_open_question(cx: &mut TestAppContext) {
-        let (_dir, view, cx) = open_marked_up(cx);
-        view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::EmptyTrash, window, cx);
-        });
-        draw(cx);
+        let (_dir, _view, cx) = open_marked_up(cx);
+        keys(cx, "ctrl-shift-backspace");
+        keys(cx, "ctrl-shift-t");
+        click("empty-trash", cx);
         keys(cx, "ctrl-shift-c");
         assert_eq!(clipboard(cx), None);
+
+        click("cancel", cx);
+        keys(cx, "ctrl-shift-c");
+        assert_eq!(clipboard(cx).as_deref(), Some(MARKED_UP));
     }
 
     fn set_desktop(cx: &mut VisualTestContext, change: impl FnOnce(&mut Desktop)) {
@@ -3867,8 +3859,10 @@ pub(crate) mod tests {
         set_desktop(cx, |desktop| {
             desktop.transparency = desktop::Transparency::Glassy;
         });
-        let active = cx.update(|window, _| window.is_window_active());
-        assert_eq!(alpha(cx), desktop::Transparency::Glassy.alpha(active));
+        assert_eq!(alpha(cx), 0.65 * 0.96);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(alpha(cx), 0.65 * 0.985, "more solid in front");
         cx.update(|_, cx| {
             assert_eq!(cx.omarchy().background.a, 1., "dialogs paint this one");
         });
@@ -3968,6 +3962,7 @@ pub(crate) mod tests {
             let problem = view.read(cx).problem.clone().expect("the save was tried");
             assert!(problem.contains("Couldn't save"), "{problem}");
         });
+        assert!(is_said("status-problem", cx));
     }
 
     #[gpui_kit::test]
@@ -3980,9 +3975,12 @@ pub(crate) mod tests {
             let problem = view.read(cx).problem.clone().unwrap();
             assert!(problem.contains("Couldn't move to Trash"), "{problem}");
         });
+        assert!(is_said("status-problem", cx));
 
         cx.simulate_input(" and more");
         assert!(!cx.simulate_close(), "this failure hasn't been seen yet");
+        draw(cx);
+        assert!(is_said("status-problem", cx));
         assert!(cx.simulate_close(), "a second attempt closes anyway");
     }
 
@@ -4071,8 +4069,16 @@ pub(crate) mod tests {
         dir.join(id)
     }
 
+    /// Whether the strip under the note has something to read there.
+    pub(crate) fn is_said(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+        cx.debug_bounds(selector)
+            .is_some_and(|said| said.size.width > px(0.))
+    }
+
     fn notice(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> Option<SharedString> {
-        cx.update(|_, cx| view.read(cx).notice.clone())
+        let notice = cx.update(|_, cx| view.read(cx).notice.clone());
+        assert_eq!(is_said("status-notice", cx), notice.is_some());
+        notice
     }
 
     #[gpui_kit::test]
@@ -4081,13 +4087,8 @@ pub(crate) mod tests {
         fs::write(dir.path().join(".trash").join(&id), "rewritten elsewhere").unwrap();
         notice_changes(&view, cx);
         let delete = |cx: &mut VisualTestContext| {
-            view.update_in(cx, |this, window, cx| {
-                this.ask_to_delete_forever(id.clone(), window, cx);
-            });
-            draw(cx);
-            cx.dispatch_action(actions::Confirm { secondary: false });
-            cx.run_until_parked();
-            draw(cx);
+            click("delete-forever", cx);
+            click("confirm", cx);
         };
         delete(cx);
         assert_eq!(trashed_texts(dir.path()), ["rewritten elsewhere"]);
@@ -4329,15 +4330,11 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn a_trashed_note_deleted_elsewhere_waits_for_an_open_question(cx: &mut TestAppContext) {
         let (dir, view, cx, id) = with_one_trashed_note(cx);
-        cx.update(|window, cx| {
-            view.update(cx, |this, cx| {
-                this.ask_to_delete_forever(id.clone(), window, cx)
-            });
-        });
+        click("delete-forever", cx);
         fs::remove_file(dir.path().join(".trash").join(&id)).unwrap();
         notice_changes(&view, cx);
         assert_eq!(selection(&view, cx), Selection::Trashed(id));
-        cx.update(|_, cx| assert!(view.read(cx).has_question()));
+        assert!(question_is_open(cx));
     }
 
     /// The one test here with real file events. They arrive on their own thread, so

@@ -3,15 +3,15 @@ Run: cargo test --locked --quiet --features mac-look set_in_as_the_look_has_it
 Says: notes_are_spaced_and_set_in_as_the_look_has_it --- FAILED
 
 diff --git i/src/app.rs w/src/app.rs
-index cfd3f6c..1cb8a6f 100644
+index 51372d8..0c2d018 100644
 --- i/src/app.rs
 +++ w/src/app.rs
-@@ -2590,7 +2590,7 @@ pub(crate) mod tests {
-             (gap - rems(ROW_GAP).to_pixels(rem)).abs() < px(0.5),
-             "{gap:?}"
-         );
--        assert_eq!(first.left(), rems(ROW_INSET).to_pixels(rem));
+@@ -2612,7 +2612,7 @@ pub(crate) mod tests {
+         let above = first.top() - list.top();
+         let below = list.bottom() - last.bottom();
+         assert!(spaced(gap), "{gap:?} between two");
+-        assert!(spaced(first.left()), "{:?} at the side", first.left());
 +        assert_eq!(first.left(), px(0.));
-         assert_eq!(
-             row_spacing(0, 2).0,
-             ROW_GAP / 2. + LIST_END,
+         assert!(spaced(above - gap), "{above:?} above the first");
+         assert!(spaced(below - gap), "{below:?} below the last");
+     }
