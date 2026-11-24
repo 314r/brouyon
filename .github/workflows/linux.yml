@@ -35,6 +35,8 @@ jobs:
             target
           key: linux-${{ hashFiles('Cargo.lock', 'mise.toml') }}-${{ github.sha }}
           restore-keys: linux-${{ hashFiles('Cargo.lock', 'mise.toml') }}-
+      # The licence check reads the crates of every target, offline.
+      - run: cargo fetch --locked
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: bin/test --locked
