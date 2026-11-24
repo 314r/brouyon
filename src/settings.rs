@@ -8,6 +8,7 @@ use crate::{
         ThemeMode,
     },
     desktop::{self, Desktop},
+    kept,
     shortcuts::primary,
     title_bar::{self, BAR_HEIGHT, TitleBar},
 };
@@ -311,7 +312,7 @@ impl SettingsWindow {
                 .accessibility_label("Close settings")
                 .debug_selector(|| "close-settings".into())
                 .child(icon(IconName::Close))
-                .on_click(|_, window, _| window.remove_window())
+                .on_click(|_, window, _| kept::close_textless(window))
         });
         top_bar(
             div()
@@ -537,13 +538,10 @@ impl Render for SettingsWindow {
             .capture_action(cx.listener(|this, _: &Cancel, window, cx| {
                 if !this.idle_choice.read(cx).is_open() {
                     cx.stop_propagation();
-                    window.remove_window();
+                    kept::close_textless(window);
                 }
             }))
-            .on_action(|_: &CloseSettings, window, _| window.remove_window())
-            .on_action(cx.listener(|this, _: &Quit, _, cx| {
-                this.app.update(cx, |app, cx| app.quit(cx));
-            }))
+            .on_action(|_: &CloseSettings, window, _| kept::close_textless(window))
             .child(sidebar)
             .child(
                 div()

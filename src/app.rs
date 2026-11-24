@@ -4,6 +4,7 @@
 use crate::{
     config::{Config, CopyFormat, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
     desktop::{self, Desktop},
+    kept::{self, Kept, MayLeave, SaveState, Warned},
     lists, markdown,
     settings::{self, SettingsWindow},
     shortcuts::{self, primary},
@@ -70,8 +71,7 @@ gpui_kit::actions!(
 pub fn init(cx: &mut App) {
     use gpui_kit::KeyBinding;
     desktop::init(cx);
-    // Only reached when no window is there to answer, which each does by saving first.
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| cx.defer(ask_to_quit));
     // Scoped to the app's context: a binding with no context would outrank the
     // editor's and the dialog's, so Escape would skip past an open question.
     let context = Some(KEY_CONTEXT);
@@ -108,6 +108,18 @@ pub fn init(cx: &mut App) {
     use_mono_font(cx);
     cx.observe_global::<Theme>(use_mono_font).detach();
     cx.observe_global::<Desktop>(use_mono_font).detach();
+}
+
+/// The only way out, from any window, the menu or with no window at all: whoever holds
+/// the text is asked.
+fn ask_to_quit(cx: &mut App) {
+    let holder = |window: gpui_kit::AnyWindowHandle| window.downcast::<Brouyon>();
+    match cx.windows().into_iter().find_map(holder) {
+        Some(window) => {
+            window.update(cx, |this, _, cx| this.quit(cx)).ok();
+        }
+        None => kept::quit_without_windows(cx),
+    }
 }
 
 /// gpui-omarchy looks the monospace font up only once, so a font changed since then
@@ -329,10 +341,7 @@ pub struct Brouyon {
     /// The words a note has to hold to be listed, from [`store::terms`]. None lists
     /// every note.
     filter_terms: Vec<String>,
-    /// The editor holds text that isn't on disk yet.
-    dirty: bool,
-    /// The last attempt to write that text failed, and `problem` says so.
-    save_failed: bool,
+    save_state: SaveState,
     /// `None` for a blank note and in the Trash, which have no file to save to.
     loaded: Option<Loaded>,
     problem: Option<SharedString>,
@@ -379,7 +388,7 @@ impl Brouyon {
         ];
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            view.update(cx, |this, cx| this.on_close(cx))
+            view.update(cx, |this, cx| this.on_close(cx).is_some())
                 .unwrap_or(true)
         });
 
@@ -396,8 +405,7 @@ impl Brouyon {
             filter,
             filter_open: false,
             filter_terms: Vec::new(),
-            dirty: false,
-            save_failed: false,
+            save_state: SaveState::default(),
             loaded: None,
             problem: None,
             notice: None,
@@ -470,7 +478,7 @@ impl Brouyon {
             return;
         }
         self.seen = editor.value();
-        self.dirty = true;
+        self.save_state.changed();
         let words = markdown::word_count(&self.seen);
         if words != self.words {
             self.words = words;
@@ -482,7 +490,7 @@ impl Brouyon {
             this.update_in(cx, |this, window, cx| {
                 // A change that arrived during the typing was left for
                 // the save to settle, and can be taken now.
-                if this.flush(cx) {
+                if this.flush(cx).is_some() {
                     this.refresh_open_note(window, cx);
                 }
             })
@@ -579,15 +587,15 @@ impl Brouyon {
         });
     }
 
-    /// Writes any pending text. Returns false if it could not be saved, in which
-    /// case the text stays in the editor and callers must not navigate away.
+    /// Writes any pending text. Nothing if it could not be saved, in which case it
+    /// stays in the editor.
     ///
     /// A file that changed elsewhere since it was read is never written over: the
     /// text goes into a new note beside it, which the editor carries on in.
-    fn flush(&mut self, cx: &mut Context<Self>) -> bool {
+    fn flush(&mut self, cx: &mut Context<Self>) -> Option<Kept> {
         self.save_task = None;
-        if !self.dirty {
-            return true;
+        if let Some(kept) = self.save_state.kept() {
+            return Some(kept);
         }
         let text = self.editor.read(cx).value();
         let empty = text.trim().is_empty();
@@ -615,18 +623,17 @@ impl Brouyon {
         };
         match flushed {
             Ok(flushed) => {
-                self.dirty = false;
-                self.save_failed = false;
+                let kept = self.save_state.saved();
                 self.problem = None;
                 self.record_save(flushed, &text, cx);
                 cx.notify();
-                true
+                Some(kept)
             }
             Err(error) => {
-                self.save_failed = true;
+                self.save_state.refused();
                 self.problem = Some(format!("Couldn't save: {error}").into());
                 cx.notify();
-                false
+                None
             }
         }
     }
@@ -708,23 +715,22 @@ impl Brouyon {
         }
     }
 
-    /// Opens `selection`, saving the current note first. Stays put if either
-    /// step fails, so no unsaved text is ever left behind.
+    /// Opens `selection`, saving the current note first. Stays put if either step fails.
     fn select(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.flush(cx) {
+        let Some(kept) = self.flush(cx) else {
             return;
-        }
+        };
         // Reselecting the open note keeps its cursor and undo history. A blank
         // note is always rebuilt, which drops the history of an emptied note.
         if selection == self.selection && selection != Selection::Blank {
             self.focus_content(window, cx);
             return;
         }
-        self.open(selection, window, cx);
+        self.open(selection, kept, window, cx);
     }
 
-    /// Shows `selection` in a fresh editor. Assumes pending text is already saved.
-    fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows `selection` in a fresh editor.
+    fn open(&mut self, selection: Selection, _: Kept, window: &mut Window, cx: &mut Context<Self>) {
         let text = match &selection {
             Selection::Blank => Ok(String::new()),
             Selection::Note(id) => self.store.read(id),
@@ -780,7 +786,8 @@ impl Brouyon {
             self.restart_idle_timer(window, cx);
             return;
         }
-        if self.selection == Selection::Blank && !self.dirty {
+        let pending = self.save_state.kept().is_none();
+        if self.selection == Selection::Blank && !pending {
             if self.filter_open {
                 self.close_filter();
                 self.focus_content(window, cx);
@@ -789,8 +796,8 @@ impl Brouyon {
             return;
         }
         self.select(Selection::Blank, window, cx);
-        // Still dirty means the save failed: stay on the note and try again later.
-        if self.dirty {
+        // Stays on a note whose save failed, and tries again later.
+        if self.save_state.kept().is_none() {
             self.restart_idle_timer(window, cx);
         }
     }
@@ -850,15 +857,18 @@ impl Brouyon {
     /// can happen at any moment, and must not take the keyboard from wherever it is.
     /// A note with pending edits is left for its next save, which keeps both.
     fn refresh_open_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kept) = self.save_state.kept() else {
+            return;
+        };
         match self.selection.clone() {
-            Selection::Note(id) if !self.dirty => match self.store.read(&id) {
+            Selection::Note(id) => match self.store.read(&id) {
                 Ok(text) => {
                     if self
                         .loaded
                         .as_ref()
                         .is_none_or(|loaded| loaded.text != text)
                     {
-                        self.show_in_place(&text, window, cx);
+                        self.show_in_place(&text, kept, window, cx);
                     }
                     // The date alone can change, and is shown.
                     self.loaded = Some(self.loaded_now(&id, text));
@@ -866,7 +876,7 @@ impl Brouyon {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     self.selection = Selection::Blank;
                     self.loaded = None;
-                    self.show_in_place("", window, cx);
+                    self.show_in_place("", kept, window, cx);
                 }
                 // Not to be read just now, which is no reason to let go of it.
                 Err(_) => {}
@@ -875,7 +885,7 @@ impl Brouyon {
             Selection::Trashed(id)
                 if !self.dialog_is_open() && !self.trash.iter().any(|note| note.id == id) =>
             {
-                self.show_next_trashed(window, cx);
+                self.show_next_trashed(kept, window, cx);
             }
             _ => {}
         }
@@ -884,7 +894,7 @@ impl Brouyon {
     /// Replaces the editor's text without a new editor, which would take the
     /// keyboard. The cursor goes back to the start and the undo history is dropped,
     /// as the text it belonged to is no longer there.
-    fn show_in_place(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_in_place(&mut self, text: &str, _: Kept, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |state, cx| {
             state.set_value(text.to_owned(), window, cx);
         });
@@ -898,35 +908,39 @@ impl Brouyon {
     /// Saves before the window goes. The first attempt to leave after a failed save
     /// is refused so the error can be seen, and a second one is let through. Only a
     /// failed save counts: another problem on screen says nothing about this text.
-    fn may_leave(&mut self, cx: &mut Context<Self>) -> bool {
-        let already_warned = self.save_failed;
-        self.flush(cx) || already_warned
+    fn may_leave(&mut self, cx: &mut Context<Self>) -> Option<MayLeave> {
+        let warned = self.save_state.warned();
+        let kept = self.flush(cx);
+        kept.map(Kept::may_leave)
+            .or_else(|| warned.map(Warned::may_leave_anyway))
     }
 
     /// Quitting skips the window's own close, so it asks the same question.
-    pub fn quit(&mut self, cx: &mut Context<Self>) {
-        if self.may_leave(cx) {
-            cx.quit();
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        if let Some(leave) = self.may_leave(cx) {
+            leave.quit(cx);
         }
     }
 
     /// Closes the window from a key or a menu, as its own button would.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.on_close(cx) {
-            window.remove_window();
+        if let Some(leave) = self.on_close(cx) {
+            leave.close(window);
         }
     }
 
-    fn on_close(&mut self, cx: &mut Context<Self>) -> bool {
-        let closing = self.may_leave(cx);
-        if closing && let Some(settings) = self.settings_window {
+    fn on_close(&mut self, cx: &mut Context<Self>) -> Option<MayLeave> {
+        let leave = self.may_leave(cx);
+        if leave.is_some()
+            && let Some(settings) = self.settings_window
+        {
             // The app runs until its last window closes, and Settings can't
             // outlive the window it belongs to.
             settings
-                .update(cx, |_, window, _| window.remove_window())
+                .update(cx, |_, window, _| kept::close_textless(window))
                 .ok();
         }
-        closing
+        leave
     }
 
     /// The rows of the list being shown, top to bottom: the notes or the trash,
@@ -964,7 +978,7 @@ impl Brouyon {
     /// Moves through the list. Going up from the first note reaches a blank one,
     /// and going down from a note that isn't listed reaches the first that is.
     fn step(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.flush(cx) {
+        if self.flush(cx).is_none() {
             return;
         }
         let rows = self.rows();
@@ -988,9 +1002,9 @@ impl Brouyon {
     fn move_to_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Text typed moments ago may not have a file yet.
         let before = self.selection.clone();
-        if !self.flush(cx) {
+        let Some(kept) = self.flush(cx) else {
             return;
-        }
+        };
         let Selection::Note(id) = self.selection.clone() else {
             return;
         };
@@ -1002,7 +1016,7 @@ impl Brouyon {
         match self.store.trash(&id) {
             Ok(_) => {
                 self.reload_lists();
-                self.open(Selection::Blank, window, cx);
+                self.open(Selection::Blank, kept, window, cx);
             }
             Err(error) => {
                 self.problem = Some(format!("Couldn't move to Trash: {error}").into());
@@ -1026,9 +1040,12 @@ impl Brouyon {
 
     /// The Trash tab, which shows its first note. An empty trash has nothing to show.
     fn show_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection.in_trash() || !self.flush(cx) {
+        if self.selection.in_trash() {
             return;
         }
+        let Some(kept) = self.flush(cx) else {
+            return;
+        };
         self.reload_lists();
         let Some(first) = self.trash.first().map(|note| note.id.clone()) else {
             cx.notify();
@@ -1038,7 +1055,7 @@ impl Brouyon {
             Selection::Note(id) => Some(id.clone()),
             _ => None,
         };
-        self.open(Selection::Trashed(first), window, cx);
+        self.open(Selection::Trashed(first), kept, window, cx);
     }
 
     fn toggle_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1051,21 +1068,24 @@ impl Brouyon {
 
     /// Once a note has left the trash: the first one still listed, or the notes.
     /// When none of what was looked for is left, the whole trash is listed again.
-    fn show_next_trashed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_next_trashed(&mut self, kept: Kept, window: &mut Window, cx: &mut Context<Self>) {
         if self.rows().is_empty() {
             self.close_filter();
         }
         match self.rows().into_iter().next() {
-            Some(next) => self.open(next, window, cx),
+            Some(next) => self.open(next, kept, window, cx),
             None => self.show_notes(window, cx),
         }
     }
 
     fn restore(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kept) = self.flush(cx) else {
+            return;
+        };
         match self.store.restore(&id) {
             Ok(restored) => {
                 self.reload_lists();
-                self.open(Selection::Note(restored), window, cx);
+                self.open(Selection::Note(restored), kept, window, cx);
             }
             Err(error) => {
                 self.problem = Some(format!("Couldn't restore: {error}").into());
@@ -1126,14 +1146,14 @@ impl Brouyon {
         let Some(confirm) = self.confirm.take() else {
             return;
         };
-        if confirmed {
+        if confirmed && let Some(kept) = self.flush(cx) {
             let result = match confirm {
                 Confirm::DeleteForever(id) => self.store.purge(&id),
                 Confirm::EmptyTrash => self.store.empty_trash(),
             };
             self.reload_lists();
             match result {
-                Ok(()) => self.show_next_trashed(window, cx),
+                Ok(()) => self.show_next_trashed(kept, window, cx),
                 Err(error) => {
                     self.problem = Some(format!("Couldn't delete: {error}").into());
                     self.focus_content(window, cx);
@@ -1228,12 +1248,12 @@ impl Brouyon {
         if target == self.config.notes_dir {
             return;
         }
-        if !self.flush(cx) {
+        let Some(kept) = self.flush(cx) else {
             self.settings_problem =
                 Some("The open note couldn't be saved, so the folder didn't change.".into());
             cx.notify();
             return;
-        }
+        };
         let store = match Store::open(&target) {
             Ok(store) => store,
             Err(error) => {
@@ -1252,7 +1272,7 @@ impl Brouyon {
         self.confirm = None;
         let saved = self.config.set_notes_dir(dir);
         self.reload_lists();
-        self.open(Selection::Blank, window, cx);
+        self.open(Selection::Blank, kept, window, cx);
         self.report_setting(saved, cx);
     }
 
@@ -1952,7 +1972,6 @@ impl Render for Brouyon {
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 this.restart_idle_timer(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit(cx)))
             .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close(window, cx)))
             // The key that opens the shortcuts closes them too, but a question comes first.
             .when(!questioning, |root| {
@@ -2675,7 +2694,7 @@ pub(crate) mod tests {
         let (_dir, view, cx) = open_with(cx, dir);
         let look = |cx: &mut VisualTestContext| {
             keys(cx, "right shift-down");
-            assert!(!cx.update(|_, cx| view.read(cx).dirty));
+            assert!(cx.update(|_, cx| view.read(cx).save_state.kept().is_some()));
             wait(cx, SAVE_DELAY);
             cx.update(|window, cx| view.update(cx, |this, cx| this.on_idle(window, cx)));
             fs::metadata(&path).unwrap().modified().unwrap()

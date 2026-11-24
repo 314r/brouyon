@@ -1,19 +1,19 @@
 Mistake: before 25a48ef, any earlier problem on screen let a close through a failed save
+Run: cargo check --locked --quiet
+Says: cannot initialize a tuple struct which contains private fields
 Run: verify/check --drift
 Says: may_leave changed
-Run: cargo test --locked --quiet even_after_another_problem
-Says: closing_shows_a_failed_save_even_after_another_problem --- FAILED
 
 diff --git i/src/app.rs w/src/app.rs
-index a60b56b..9e7dbf4 100644
+index 4aec955..b760a5e 100644
 --- i/src/app.rs
 +++ w/src/app.rs
-@@ -899,7 +899,7 @@ impl Brouyon {
+@@ -909,7 +909,7 @@ impl Brouyon {
      /// is refused so the error can be seen, and a second one is let through. Only a
      /// failed save counts: another problem on screen says nothing about this text.
-     fn may_leave(&mut self, cx: &mut Context<Self>) -> bool {
--        let already_warned = self.save_failed;
-+        let already_warned = self.problem.is_some();
-         self.flush(cx) || already_warned
-     }
- 
+     fn may_leave(&mut self, cx: &mut Context<Self>) -> Option<MayLeave> {
+-        let warned = self.save_state.warned();
++        let warned = self.problem.is_some().then_some(Warned(()));
+         let kept = self.flush(cx);
+         kept.map(Kept::may_leave)
+             .or_else(|| warned.map(Warned::may_leave_anyway))

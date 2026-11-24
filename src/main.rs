@@ -1,3 +1,8 @@
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "#[gpui_kit::test] quits")
+)]
+
 // GPUI macros expand through the canonical `gpui` crate path.
 extern crate gpui_kit as gpui;
 
@@ -5,6 +10,7 @@ mod app;
 mod assets;
 mod config;
 mod desktop;
+mod kept;
 mod lists;
 #[cfg(target_os = "macos")]
 mod macos;

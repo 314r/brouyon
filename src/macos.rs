@@ -9,6 +9,7 @@ use crate::{
         ToggleShortcuts, ToggleTrash,
     },
     config::ThemeMode,
+    kept,
 };
 use gpui_kit::base::ThemeAppearance;
 use gpui_kit::{
@@ -37,12 +38,8 @@ pub fn init(cx: &mut App) {
 
     // A Mac app keeps running when its windows are closed, but Brouyon is its window:
     // without one, clicking its icon in the Dock would do nothing.
-    cx.on_window_closed(|cx, _| {
-        if cx.windows().is_empty() {
-            cx.quit();
-        }
-    })
-    .detach();
+    cx.on_window_closed(|cx, _| kept::quit_without_windows(cx))
+        .detach();
 }
 
 /// The theme that follows the system, which on a Mac is its light or dark appearance,

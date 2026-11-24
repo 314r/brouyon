@@ -34,9 +34,9 @@ VARIABLES
     selection,
     text,           \* what the editor holds
     marked,         \* some of it is still being composed
-    dirty,
+    dirty,          \* SaveState isn't Kept
     loaded,
-    saveFailed,
+    saveFailed,     \* SaveState is Refused
     asking,         \* `confirm` holds a DeleteForever
     \* Where the handler that is running has got to.
     pc, handler, picked,
@@ -167,7 +167,7 @@ MoveToTrash ==
     /\ CanAct /\ selection.kind # "trashed"
     /\ Flush([Does("trash") EXCEPT !.from = selection])
 
-\* quit, close and on_close, through may_leave.
+\* ask_to_quit, quit, close and on_close, through may_leave.
 Quit ==
     /\ CanAct
     /\ Flush([Does("quit") EXCEPT !.warned =
@@ -507,6 +507,9 @@ QuittingKeepsMine  == "quit"     \notin dropped
 
 \* Not part of the promise: what `loaded` is for. It has to be what the user saw.
 LoadedIsShown == selection.kind = "note" => loaded = shown
+
+\* SaveState has three values, so a text can't be both refused and kept.
+RefusedIsPending == saveFailed => dirty
 
 TypeOK ==
     /\ notes \in Files /\ trash \in Files

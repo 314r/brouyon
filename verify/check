@@ -49,7 +49,7 @@ RULES = {
     "ConflictKeepsMine": "A conflict never drops the text typed here.",
     "QuittingKeepsMine": "Quitting never drops text that isn't in a file, unless it said it couldn't save.",
 }
-ALSO = ["TypeOK", "LoadedIsShown", "TrashIsReadOnly"]
+ALSO = ["TypeOK", "LoadedIsShown", "TrashIsReadOnly", "RefusedIsPending"]
 
 TODAY = {"GapIsQuiet": False, "TrashIsQuiet": False}
 QUIET = {"GapIsQuiet": True, "TrashIsQuiet": True}
@@ -285,10 +285,13 @@ def locked():
     return re.findall(r"^\| `Cargo.lock` \| `([\w-]+) ([\d.]+)` \|", TABLE.read_text(), re.M)
 
 
+def without_comments(code):
+    """A comment can change without the model describing the code any less."""
+    return "\n".join(line.rstrip() for line in code.splitlines() if not line.lstrip().startswith("//"))
+
+
 def fingerprint(code):
-    """Of the code alone: a comment can change without the model describing it any less."""
-    lines = [line.rstrip() for line in code.splitlines() if not line.lstrip().startswith("//")]
-    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:12]
+    return hashlib.sha256(without_comments(code).encode()).hexdigest()[:12]
 
 
 def functions(source):
@@ -306,8 +309,9 @@ def functions(source):
 # A function that does one of these decides what becomes of a note's text, so it
 # belongs in README.md's table, covered or left out on purpose.
 TOUCHES = {
-    "src/app.rs": r"self\.store\.|self\.dirty\b|self\.loaded = |self\.selection = |self\.save_failed\b"
-                  r"|replace_editor\(|set_value\(|show_in_place\(|\.flush\(|remove_window\(|cx\.quit\(",
+    "src/app.rs": r"self\.store\.|self\.save_state\b|self\.loaded = |self\.selection = |\bKept\b|MayLeave"
+                  r"|replace_editor\(|set_value\(|show_in_place\(|\.flush\(|quit_without_windows\(",
+    "src/kept.rs": r"Kept|Warned|MayLeave|State::|remove_window\(|cx\.quit\(",
     "src/store.rs": r"fs::(?:rename|remove_\w+|write)\(|File::create\(|write_if\(|write_atomically\(|free_name\(",
 }
 
@@ -324,7 +328,7 @@ def drift():
             messages.append(f"{path}: {name} changed")
     for path, pattern in TOUCHES.items():
         for name, body in now[path].items():
-            if name not in known.get(path, ()) and re.search(pattern, body):
+            if name not in known.get(path, ()) and re.search(pattern, without_comments(body)):
                 messages.append(f"{path}: {name} isn't in README.md's table, and handles notes' text")
     lock = (ROOT / "Cargo.lock").read_text()
     for name, version in locked():
