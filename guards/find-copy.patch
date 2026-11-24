@@ -5,7 +5,7 @@ Run: cargo test --locked --quiet finding_follows
 Says: finding_follows_what_an_input_method_composes --- FAILED
 
 diff --git i/src/app.rs w/src/app.rs
-index 012be5f..dddb67c 100644
+index 954969e..ecb3185 100644
 --- i/src/app.rs
 +++ w/src/app.rs
 @@ -339,8 +339,9 @@ pub struct Brouyon {
@@ -101,21 +101,23 @@ index 012be5f..dddb67c 100644
              let notes = self.notes.iter().filter(found);
              blank
                  .then_some(Selection::Blank)
-@@ -1386,12 +1392,7 @@ impl Brouyon {
+@@ -1386,14 +1392,7 @@ impl Brouyon {
  
          let row_height = rems(3.25).to_pixels(window.rem_size());
          let rows = Rc::new(self.rows(cx));
 -        let terms = self.terms(cx);
 -        let nothing_found = rows.is_empty() && !terms.is_empty();
 -        if terms != self.listed_for {
+-            if !terms.is_empty() {
+-                self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
+-            }
 -            self.listed_for = terms;
--            self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
 -        }
 +        let nothing_found = rows.is_empty() && !self.filter_terms.is_empty();
          let count = rows.len();
          let sizes = Rc::new(
              (0..count)
-@@ -1515,7 +1516,7 @@ impl Brouyon {
+@@ -1517,7 +1516,7 @@ impl Brouyon {
              Some(note) => (
                  note.title.clone().into(),
                  format_date(note.modified, chrono::Local::now()).into(),
