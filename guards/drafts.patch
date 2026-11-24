@@ -1,0 +1,28 @@
+Mistake: 171f85a compared Brouyon with Drafts, which took three requests to remove
+Run: tools/lint
+Says: mentions Drafts
+
+diff --git i/README.md w/README.md
+index 1021c59..a131d01 100644
+--- i/README.md
++++ w/README.md
+@@ -1,5 +1,8 @@
+ <a id="readme-top"></a>
+ 
++A simplified variant of
++[Drafts](https://getdrafts.com). It always opens on a blank note, ready to type.
++
+ <div align="center">
+ 
+ <pre>
+diff --git i/pkgbuild/brouyon.desktop w/pkgbuild/brouyon.desktop
+index e8b3c6a..15903a5 100644
+--- i/pkgbuild/brouyon.desktop
++++ w/pkgbuild/brouyon.desktop
+@@ -6,5 +6,5 @@ Exec=omarchy-launch-or-focus "^brouyon\\$" "uwsm-app -- brouyon"
+ Icon=brouyon
+ Terminal=false
+ Categories=Utility;TextEditor;
+-Keywords=notes;markdown;brouillon;
++Keywords=notes;markdown;draft;brouillon;
+ StartupWMClass=brouyon

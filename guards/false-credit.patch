@@ -1,0 +1,18 @@
+Mistake: 6c59489 credited Omacut and Monologue for scripts that took nothing from them
+Run: tools/lint
+Says: LICENSE:25: credits someone else
+
+diff --git i/LICENSE w/LICENSE
+index ef976ce..acf1e4e 100644
+--- i/LICENSE
++++ w/LICENSE
+@@ -19,3 +19,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
++
++---
++
++bin/ and pkgbuild/ are adapted from Omarchy's app templates, which come from
++Omacut and Monologue (MIT, David Heinemeier Hansson). The folder watcher in
++src/watch.rs is adapted from gpui-omarchy (MIT, Copyright (c) 2026 Jason Lee).
