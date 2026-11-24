@@ -4100,6 +4100,28 @@ pub(crate) mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_trash_folder_that_was_replaced_is_still_followed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (dir, view, cx) = open(cx);
+        view.update_in(cx, |this, window, cx| this.watch_notes(window, cx));
+        let until_trashed = |cx: &mut VisualTestContext, count: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while cx.update(|_, cx| view.read(cx).trash.len()) != count {
+                assert!(std::time::Instant::now() < deadline, "{count} never showed");
+                std::thread::sleep(Duration::from_millis(10));
+                wait(cx, FOLDER_SETTLE);
+            }
+        };
+        let trash = dir.path().join(".trash");
+        fs::remove_dir_all(&trash).unwrap();
+        fs::create_dir(&trash).unwrap();
+        fs::write(trash.join("one.md"), "one").unwrap();
+        until_trashed(cx, 1);
+        fs::write(trash.join("two.md"), "two").unwrap();
+        until_trashed(cx, 2);
+    }
+
+    #[gpui_kit::test]
     fn composed_text_is_kept_when_its_note_changes_elsewhere(cx: &mut TestAppContext) {
         let (dir, view, cx) = open(cx);
         let path = saved_note(dir.path(), &view, cx, "mine");
