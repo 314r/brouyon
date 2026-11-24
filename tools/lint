@@ -100,7 +100,20 @@ def text_is_read_and_not_announced(files):
                        "every notify, as on_editor_notify does")
 
 
-RULES = [credits_match_the_code, brouyon_is_not_compared_with_drafts, text_is_read_and_not_announced]
+def the_look_is_asked_of_one_const(files):
+    """Before ebc3d0d, then before ac3e219, a test expected Linux's look and nothing on Linux could tell."""
+    asks = r'target_os\s*=\s*"(macos|linux)"|target_vendor|consts::OS|is_mac\(|"mac-look"'
+    for name, text in files.items():
+        if not name.startswith("src/") or name in ("src/look.rs", "src/macos.rs"):
+            continue
+        for number, _ in lines_with(text, asks):
+            yield (f"{name}:{number}: asks which system this is, so Linux never tests what a Mac shows. Ask "
+                   "look::MAC, which --features mac-look makes true. A call into AppKit goes in src/macos.rs, "
+                   "with what stands in for it elsewhere")
+
+
+RULES = [credits_match_the_code, brouyon_is_not_compared_with_drafts, text_is_read_and_not_announced,
+         the_look_is_asked_of_one_const]
 
 
 def main():

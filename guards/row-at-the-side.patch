@@ -1,0 +1,17 @@
+Mistake: 2770056's test measured a row of the list from the window's side, which a Mac sets it in from, and macOS CI went red
+Run: cargo test --locked --quiet --features mac-look set_in_as_the_look_has_it
+Says: notes_are_spaced_and_set_in_as_the_look_has_it --- FAILED
+
+diff --git i/src/app.rs w/src/app.rs
+index cfd3f6c..1cb8a6f 100644
+--- i/src/app.rs
++++ w/src/app.rs
+@@ -2590,7 +2590,7 @@ pub(crate) mod tests {
+             (gap - rems(ROW_GAP).to_pixels(rem)).abs() < px(0.5),
+             "{gap:?}"
+         );
+-        assert_eq!(first.left(), rems(ROW_INSET).to_pixels(rem));
++        assert_eq!(first.left(), px(0.));
+         assert_eq!(
+             row_spacing(0, 2).0,
+             ROW_GAP / 2. + LIST_END,

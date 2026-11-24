@@ -5,7 +5,9 @@ use crate::{
     config::{Config, CopyFormat, DEFAULT_TEXT_PERCENT, TEXT_PERCENT_STEP, ThemeMode},
     desktop::{self, Desktop},
     kept::{self, Kept, MayLeave, SaveState, Warned},
-    lists, markdown,
+    lists,
+    look::MAC,
+    macos, markdown,
     settings::{self, SettingsWindow},
     shortcuts::{self, primary},
     store::{self, Note, NoteId, Saved, Store},
@@ -150,26 +152,23 @@ pub fn apply_theme(mode: ThemeMode, cx: &mut App) {
     // On a Mac the system's accent goes over every palette. Each palette also brings
     // back the corners gpui-omarchy follows, which are square without Hyprland, so a
     // Mac's go on last.
-    #[cfg(target_os = "macos")]
-    {
-        crate::macos::use_system_accent(cx);
-        crate::macos::round_corners(cx);
+    if MAC {
+        macos::use_system_accent(cx);
+        macos::round_corners(cx);
     }
     // Not left to the observer: at startup it isn't active yet, and it never hears of
     // this theme, because GPUI drops a notification when one is already queued.
     use_mono_font(cx);
 }
 
-#[cfg(all(not(test), not(target_os = "macos")))]
-fn follow_desktop_theme(cx: &mut App) {
-    Theme::follow_system(cx);
-}
-
 /// A Mac has no Omarchy theme, so the palette follows its light or dark appearance.
 /// `macos::follow_appearance` applies it again when that changes.
-#[cfg(all(not(test), target_os = "macos"))]
+#[cfg(not(test))]
 fn follow_desktop_theme(cx: &mut App) {
     use gpui_kit::WindowAppearance;
+    if !MAC {
+        return Theme::follow_system(cx);
+    }
     match cx.window_appearance() {
         WindowAppearance::Light | WindowAppearance::VibrantLight => {
             Theme::flexoki_light().apply(cx);
@@ -185,10 +184,10 @@ fn follow_desktop_theme(cx: &mut App) {
     Theme::system_or_default().apply(cx);
 }
 
-/// The spacing of the note list, in rems. On a Mac each note is a rounded highlight
-/// set in from the list's sides, with space between them and at the list's ends, as
-/// in Finder's sidebar. On Linux the rows fill the list and touch.
-const MAC: bool = cfg!(target_os = "macos");
+// The spacing of the note list, in rems. On a Mac each note is a rounded highlight
+// set in from the list's sides, with space between them and at the list's ends, as
+// in Finder's sidebar. On Linux the rows fill the list and touch.
+
 /// Between the list's sides and a note's highlight.
 const ROW_INSET: f32 = if MAC { 0.375 } else { 0. };
 /// Between a note's highlight and its text.
@@ -269,12 +268,9 @@ fn bar_inset(window: &Window) -> Pixels {
 /// A button in a bottom bar. On a Mac its corners are concentric with the window's:
 /// as round as the window's, less the distance between them.
 fn bar_button(button: Button, window: &Window) -> Button {
-    let button = button.h(rems(BAR_BUTTON_HEIGHT));
-    #[cfg(target_os = "macos")]
-    let button = button.rounded((px(crate::macos::WINDOW_CORNER) - bar_inset(window)).max(px(0.)));
-    #[cfg(not(target_os = "macos"))]
-    let _ = window;
-    button
+    button.h(rems(BAR_BUTTON_HEIGHT)).when(MAC, |button| {
+        button.rounded((px(macos::WINDOW_CORNER) - bar_inset(window)).max(px(0.)))
+    })
 }
 
 /// What the editor pane is showing. The list being shown follows from it.
@@ -1464,7 +1460,7 @@ impl Brouyon {
             .h(rems(BAR_HEIGHT))
             // The gear's own padding sets its icon in line with the titles, except on
             // a Mac, where it keeps off the window's corner.
-            .pl(if cfg!(target_os = "macos") {
+            .pl(if MAC {
                 bar_inset(window)
             } else {
                 rems(0.0625).to_pixels(window.rem_size())
@@ -1523,11 +1519,7 @@ impl Brouyon {
             ),
             None => ("New note".into(), "".into(), "".into()),
         };
-        #[cfg(target_os = "macos")]
-        let active = crate::macos::is_key_window(window);
-        #[cfg(not(target_os = "macos"))]
-        let active = window.is_window_active();
-        let colors = row_colors(&t, selected, active);
+        let colors = row_colors(&t, selected, macos::is_key_window(window));
         let (above, below) = row_spacing(row, count);
         let row = div()
             .id(("note-row", row))
@@ -1738,7 +1730,7 @@ impl Brouyon {
             .pl(rems(if copying { 0.8125 } else { 1.5 }))
             // On a Mac, the button in the corner keeps as far off the side as off the
             // bottom.
-            .pr(if cfg!(target_os = "macos") {
+            .pr(if MAC {
                 bar_inset(window)
             } else {
                 rems(0.125).to_pixels(window.rem_size())
@@ -2247,6 +2239,7 @@ pub(crate) mod tests {
             gpui_omarchy::init(cx);
             init(cx);
             apply_theme(ThemeMode::Omarchy, cx);
+            macos::bind_editor_keys(cx);
         });
         let store = Store::open(dir.path()).unwrap();
         let config = Config::for_test(dir.path());
@@ -2275,7 +2268,7 @@ pub(crate) mod tests {
 
     /// The tests press shortcuts with Linux's Ctrl, which is ⌘ on macOS.
     pub(crate) fn on_this_system(keystrokes: &str) -> String {
-        if cfg!(target_os = "macos") {
+        if MAC {
             keystrokes.replace("ctrl-", "cmd-")
         } else {
             keystrokes.to_owned()
@@ -2581,9 +2574,8 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["private"]);
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui_kit::test]
-    fn notes_are_spaced_highlights_set_in_from_the_list_on_a_mac(cx: &mut TestAppContext) {
+    fn notes_are_spaced_and_set_in_as_the_look_has_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.md"), "aaa").unwrap();
         fs::write(dir.path().join("b.md"), "bbb").unwrap();
@@ -2612,15 +2604,11 @@ pub(crate) mod tests {
     }
 
     /// A test window has no AppKit window to ask, so GPUI's answer stands.
-    #[cfg(target_os = "macos")]
     #[gpui_kit::test]
     fn without_appkit_the_window_is_in_front_when_gpui_says_so(cx: &mut TestAppContext) {
         let (_dir, _view, cx) = open(cx);
         cx.update(|window, _| {
-            assert_eq!(
-                crate::macos::is_key_window(window),
-                window.is_window_active()
-            );
+            assert_eq!(macos::is_key_window(window), window.is_window_active());
         });
     }
 
@@ -2639,7 +2627,7 @@ pub(crate) mod tests {
         let plain = row_colors(&t, false, true);
         assert!(plain.fill.is_none());
         let shown = row_colors(&t, true, true);
-        if cfg!(target_os = "macos") {
+        if MAC {
             assert_eq!(shown.fill, Some(t.accent));
             assert_eq!(shown.title, t.on_accent, "readable on the accent");
             assert_eq!(row_colors(&t, true, false).fill, Some(t.selected_fill()));
@@ -2778,9 +2766,11 @@ pub(crate) mod tests {
         assert!(trashed_texts(dir.path()).is_empty());
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui_kit::test]
     fn the_buttons_in_the_bottom_corners_keep_as_far_from_both_edges(cx: &mut TestAppContext) {
+        if !MAC {
+            return;
+        }
         let (_dir, _view, cx) = open(cx);
         type_and_save(cx, "keep me");
         let window = cx.update(|window, _| window.viewport_size());
@@ -2795,7 +2785,7 @@ pub(crate) mod tests {
                 "{bottom:?} below, {side:?} beside"
             );
             assert!(
-                side < px(crate::macos::WINDOW_CORNER),
+                side < px(macos::WINDOW_CORNER),
                 "within the window's corner"
             );
         }
@@ -2927,8 +2917,7 @@ pub(crate) mod tests {
         assert_eq!(before, after, "the bar is as long on both sides");
 
         // The label starts where the titles under it do.
-        #[cfg(not(target_os = "macos"))]
-        {
+        if !MAC {
             let rem = cx.update(|window, _| window.rem_size());
             let row = cx.debug_bounds("note-row-0").unwrap();
             assert_eq!(label.left(), row.left() + rems(ROW_PADDING).to_pixels(rem));
@@ -3183,7 +3172,7 @@ pub(crate) mod tests {
         let (_dir, view, cx) = open(cx);
         cx.simulate_input("words");
         // Linux also has Ctrl+Y. macOS only has ⇧⌘Z.
-        let redo_keys: &[&str] = if cfg!(target_os = "macos") {
+        let redo_keys: &[&str] = if MAC {
             &["ctrl-shift-z"]
         } else {
             &["ctrl-shift-z", "ctrl-y"]
@@ -3849,22 +3838,26 @@ pub(crate) mod tests {
     }
 
     /// On a Mac the root is the sidebar, tinted over the blur, and the note is solid.
-    #[cfg(target_os = "macos")]
     #[gpui_kit::test]
     fn only_the_sidebar_shows_through_on_a_mac(cx: &mut TestAppContext) {
+        if !MAC {
+            return;
+        }
         let (_dir, _view, cx) = open(cx);
         cx.update(|window, cx| {
             let root = desktop::root_background(window, cx);
-            assert_eq!(root.a, crate::macos::sidebar_opacity(cx.omarchy()));
+            assert_eq!(root.a, macos::sidebar_opacity(cx.omarchy()));
             assert!(root.a < 1., "the sidebar shows through");
             assert_eq!(desktop::content_background(cx).a, 1.);
             assert_eq!(cx.omarchy().background.a, 1., "dialogs paint this one");
         });
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn only_the_root_background_follows_the_transparency_mode(cx: &mut TestAppContext) {
+        if MAC {
+            return;
+        }
         let (_dir, _view, cx) = open(cx);
         let alpha = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| desktop::root_background(window, cx).a)
@@ -3896,11 +3889,13 @@ pub(crate) mod tests {
         });
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui_kit::test]
     fn mac_corners_survive_every_theme(cx: &mut TestAppContext) {
+        if !MAC {
+            return;
+        }
         let (_dir, view, cx) = open(cx);
-        let (small, control) = crate::macos::CORNERS;
+        let (small, control) = macos::CORNERS;
         for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
             view.update(cx, |this, cx| this.set_theme(mode, cx));
             cx.update(|_, cx| {
@@ -3912,11 +3907,13 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui_kit::test]
     fn every_theme_takes_the_system_accent_on_a_mac(cx: &mut TestAppContext) {
+        if !MAC {
+            return;
+        }
         let (_dir, view, cx) = open(cx);
-        let Some(accent) = crate::macos::system_accent() else {
+        let Some(accent) = macos::system_accent() else {
             return;
         };
         for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {

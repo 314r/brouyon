@@ -1,0 +1,16 @@
+Mistake: 7783e3f kept the Mac's list, and the test of it, behind target_os, where nothing on Linux could see them
+Run: tools/lint
+Says: asks which system this is, so Linux never tests what a Mac shows
+
+diff --git i/src/app.rs w/src/app.rs
+index cfd3f6c..204db3e 100644
+--- i/src/app.rs
++++ w/src/app.rs
+@@ -2574,6 +2574,7 @@ pub(crate) mod tests {
+         assert_eq!(note_texts(dir.path()), ["private"]);
+     }
+ 
++    #[cfg(target_os = "macos")]
+     #[gpui_kit::test]
+     fn notes_are_spaced_and_set_in_as_the_look_has_it(cx: &mut TestAppContext) {
+         let dir = tempfile::tempdir().unwrap();
