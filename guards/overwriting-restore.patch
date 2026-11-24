@@ -1,0 +1,24 @@
+Mistake: create, trash and restore asked whether a name was free, then renamed over whatever had it by then
+Run: cargo clippy --locked --quiet -- -D warnings
+Says: Call move_new, which refuses to
+Run: verify/check --drift
+Says: src/store.rs: restore changed
+
+diff --git i/src/store.rs w/src/store.rs
+index 5a6aacd..e889b18 100644
+--- i/src/store.rs
++++ w/src/store.rs
+@@ -177,7 +177,12 @@ impl Store {
+     }
+ 
+     pub fn restore(&self, id: &str) -> io::Result<NoteId> {
+-        move_to_free_name(&self.trash.join(id), &self.dir, stem_of(id))
++        let mut target = id.to_string();
++        while self.dir.join(&target).exists() {
++            target.insert(0, '_');
++        }
++        fs::rename(self.trash.join(id), self.dir.join(&target))?;
++        Ok(target)
+     }
+ 
+     /// Permanently deletes one trashed note. Returns false, leaving the file, if it

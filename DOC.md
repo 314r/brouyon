@@ -82,7 +82,9 @@ that you empty completely has its file removed.
 
 Brouyon never writes over a change it hasn't shown you. If the note you are typing in
 changes elsewhere before your words are saved, they are saved as a new note beside it,
-and you carry on typing there. The strip under the note says so for a moment.
+and you carry on typing there. The strip under the note says so for a moment. Nor
+does it delete one: Delete forever leaves a note that changed since you saw it, and shows
+you what it holds now.
 
 ## Syncing with Dropbox
 

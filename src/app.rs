@@ -317,7 +317,8 @@ enum Flushed {
 /// A destructive action waiting for an answer in the confirmation dialog.
 #[derive(Clone)]
 enum Confirm {
-    DeleteForever(NoteId),
+    /// The note, and its text as it was shown.
+    DeleteForever(NoteId, SharedString),
     EmptyTrash,
 }
 
@@ -1127,6 +1128,16 @@ impl Brouyon {
         cx.notify();
     }
 
+    /// Asks about the note on screen, with the text it shows.
+    pub fn ask_to_delete_forever(
+        &mut self,
+        id: NoteId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ask(Confirm::DeleteForever(id, self.seen.clone()), window, cx);
+    }
+
     fn dialog_is_open(&self) -> bool {
         self.confirm.is_some() || self.shortcuts_open
     }
@@ -1147,13 +1158,17 @@ impl Brouyon {
             return;
         };
         if confirmed && let Some(kept) = self.flush(cx) {
-            let result = match confirm {
-                Confirm::DeleteForever(id) => self.store.purge(&id),
-                Confirm::EmptyTrash => self.store.empty_trash(),
+            let result = match &confirm {
+                Confirm::DeleteForever(id, shown) => self.store.purge(id, shown),
+                Confirm::EmptyTrash => self.store.empty_trash().map(|()| true),
             };
             self.reload_lists();
             match result {
-                Ok(()) => self.show_next_trashed(kept, window, cx),
+                Ok(true) => self.show_next_trashed(kept, window, cx),
+                Ok(false) => {
+                    self.open(self.selection.clone(), kept, window, cx);
+                    self.say("Changed elsewhere, so it wasn't deleted.", cx);
+                }
                 Err(error) => {
                     self.problem = Some(format!("Couldn't delete: {error}").into());
                     self.focus_content(window, cx);
@@ -1668,7 +1683,7 @@ impl Brouyon {
                         )
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
-                                this.ask(Confirm::DeleteForever(id.clone()), window, cx);
+                                this.ask_to_delete_forever(id.clone(), window, cx);
                             },
                         )),
                     )
@@ -1823,7 +1838,7 @@ impl Brouyon {
     fn confirm_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let confirm = self.confirm.as_ref()?;
         let (title, description, label) = match confirm {
-            Confirm::DeleteForever(_) => (
+            Confirm::DeleteForever(..) => (
                 "Delete this note forever?",
                 "This removes its file from the Trash and can't be undone.",
                 "Delete forever",
@@ -2184,15 +2199,6 @@ impl Brouyon {
 
     pub fn note_titles(&self) -> Vec<String> {
         self.notes.iter().map(|note| note.title.clone()).collect()
-    }
-
-    pub fn ask_to_delete_forever(
-        &mut self,
-        id: NoteId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.ask(Confirm::DeleteForever(id), window, cx);
     }
 
     pub fn has_question(&self) -> bool {
@@ -3035,7 +3041,7 @@ pub(crate) mod tests {
     fn deleting_forever_asks_first_and_cancel_keeps_the_note(cx: &mut TestAppContext) {
         let (dir, view, cx, id) = with_one_trashed_note(cx);
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever(id), window, cx);
+            this.ask_to_delete_forever(id, window, cx);
         });
         draw(cx);
 
@@ -3050,7 +3056,7 @@ pub(crate) mod tests {
     fn app_shortcuts_are_ignored_while_a_question_is_open(cx: &mut TestAppContext) {
         let (dir, view, cx, id) = with_one_trashed_note(cx);
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever(id), window, cx);
+            this.ask_to_delete_forever(id, window, cx);
         });
         draw(cx);
         keys(cx, "ctrl-n");
@@ -3064,7 +3070,7 @@ pub(crate) mod tests {
     fn confirming_delete_forever_removes_the_file(cx: &mut TestAppContext) {
         let (dir, view, cx, id) = with_one_trashed_note(cx);
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever(id), window, cx);
+            this.ask_to_delete_forever(id, window, cx);
         });
         draw(cx);
         cx.dispatch_action(actions::Confirm { secondary: false });
@@ -3095,7 +3101,7 @@ pub(crate) mod tests {
     fn the_idle_move_waits_for_an_open_question(cx: &mut TestAppContext) {
         let (_dir, view, cx, id) = with_one_trashed_note(cx);
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever(id), window, cx);
+            this.ask_to_delete_forever(id, window, cx);
         });
         draw(cx);
         wait(cx, IDLE * 2);
@@ -3158,7 +3164,7 @@ pub(crate) mod tests {
     fn the_shortcuts_key_leaves_an_open_question_alone(cx: &mut TestAppContext) {
         let (_dir, view, cx, id) = with_one_trashed_note(cx);
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever(id), window, cx);
+            this.ask_to_delete_forever(id, window, cx);
         });
         draw(cx);
         keys(cx, "f1");
@@ -3540,7 +3546,7 @@ pub(crate) mod tests {
         find(cx, "shopping");
         keys(cx, "enter");
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever("e.md".into()), window, cx);
+            this.ask_to_delete_forever("e.md".into(), window, cx);
         });
         draw(cx);
         cx.dispatch_action(actions::Confirm { secondary: false });
@@ -3570,7 +3576,7 @@ pub(crate) mod tests {
     fn finding_waits_for_an_open_question(cx: &mut TestAppContext) {
         let (_dir, view, cx, id) = with_one_trashed_note(cx);
         view.update_in(cx, |this, window, cx| {
-            this.ask(Confirm::DeleteForever(id), window, cx);
+            this.ask_to_delete_forever(id, window, cx);
         });
         draw(cx);
         keys(cx, "ctrl-f");
@@ -4025,6 +4031,29 @@ pub(crate) mod tests {
 
     fn notice(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> Option<SharedString> {
         cx.update(|_, cx| view.read(cx).notice.clone())
+    }
+
+    #[gpui_kit::test]
+    fn delete_forever_leaves_a_note_that_changed_since_it_was_shown(cx: &mut TestAppContext) {
+        let (dir, view, cx, id) = with_one_trashed_note(cx);
+        fs::write(dir.path().join(".trash").join(&id), "rewritten elsewhere").unwrap();
+        notice_changes(&view, cx);
+        let delete = |cx: &mut VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                this.ask_to_delete_forever(id.clone(), window, cx);
+            });
+            draw(cx);
+            cx.dispatch_action(actions::Confirm { secondary: false });
+            cx.run_until_parked();
+            draw(cx);
+        };
+        delete(cx);
+        assert_eq!(trashed_texts(dir.path()), ["rewritten elsewhere"]);
+        assert_eq!(editor_text(&view, cx), "rewritten elsewhere");
+        assert!(notice(&view, cx).unwrap().contains("wasn't deleted"));
+
+        delete(cx);
+        assert!(trashed_texts(dir.path()).is_empty(), "now it was shown");
     }
 
     #[gpui_kit::test]

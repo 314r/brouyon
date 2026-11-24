@@ -14,8 +14,8 @@ It takes about a minute on 16 cores and needs `mise`, which fetches the Java it 
 
 | Line | What it says |
 |---|---|
-| `ok promise` | With the findings set aside, every rule holds in every state within the bounds. |
-| `KNOWN finding-…` | A finding below is still in the code, and breaks only the rules recorded for it. |
+| `ok promise` | With the finding set aside, every rule holds in every state within the bounds. |
+| `KNOWN finding-…` | The finding below is still in the code, and breaks only the rules recorded for it. |
 | `ok mistake-…` | A mistake was caught. Where a commit is named, the mistake was in the code before it. |
 | `WRONG …` | A rule broke, a finding went away, or a mistake got through. |
 | `DRIFT …` | The covered code changed since the model was confirmed to describe it. |
@@ -45,13 +45,13 @@ Replay the steps on the real code, in a test in `src/app.rs`, one line for each 
 | `Select`, `ShowNotes` | `keys(cx, "ctrl-n")`, `keys(cx, "alt-down")` |
 | `IdleMove` | `wait(cx, IDLE)` |
 | `ShowTrash`, `MoveToTrash` | `keys(cx, "ctrl-shift-t")`, `keys(cx, "ctrl-shift-backspace")` |
-| `Ask`, `Confirm` | `this.ask(Confirm::DeleteForever(id), …)`, then `cx.dispatch_action(actions::Confirm { secondary: false })` |
+| `Ask`, `Confirm` | `this.ask_to_delete_forever(id, …)`, then `cx.dispatch_action(actions::Confirm { secondary: false })` |
 | `Quit` | `cx.simulate_close()` |
 | `FlushFails` | `fs::remove_dir_all(dir.path())` before the save |
 | `TheyWrite`, `TheyDelete`, and in the trash | `fs::write`, `fs::remove_file` |
 | `Sync` | `notice_changes(&view, cx)` |
 
-`replays.patch` holds the replays of the findings. `race.c` plays the other program between two system calls, on Linux:
+`replays.patch` holds the replays of the finding. `race.c` plays the other program between two system calls, on Linux:
 
 ```sh
 git apply verify/replays.patch
@@ -62,19 +62,12 @@ git apply -R verify/replays.patch
 
 ## Findings
 
-Both are open, and both were replayed on the real code.
-
-**A check and its act are two system calls** (`finding-gap`; SaveKeepsTheirs, RemoveKeepsTheirs, CreateKeepsTheirs, TrashKeepsTheirs, RestoreKeepsTheirs). Another program that writes between the two is overwritten or deleted. The comment on `write_if` accepts it for a save ("little time is left"), and it has the same shape in `remove_unchanged`, and in `create`, `trash` and `restore` with `free_name`.
+**A check and its act are two system calls** (`finding-gap`; SaveKeepsTheirs, RemoveKeepsTheirs, PurgeKeepsTheirs). It is open, and was replayed on the real code. Another program that writes between the two is overwritten or deleted. It takes the same shape in `Store::save`, `remove_unchanged` and `purge`.
 1. `Store::save` reads the file. It holds what was loaded.
 2. Another program replaces the file.
 3. `Store::save` renames its temporary file over it, and returns `Written`.
 
-The moment is microseconds wide, except in `create`, where an `fsync` is in it, and there the other program has to pick the same name, to the second.
-
-**Delete forever deletes what isn't on screen** (`finding-purge`; PurgeKeepsTheirs). `refresh_open_note` doesn't refresh a trashed note whose file changed, and `purge` doesn't compare.
-1. The Trash shows a note.
-2. Another computer restores, edits and trashes it again, under the same name. The editor still shows the old text.
-3. You choose Delete forever and confirm. The new text is gone.
+The moment is microseconds wide. `create`, `trash` and `restore` don't have it: `move_new` looks and moves in one system call.
 
 ## What it covers
 
@@ -84,6 +77,7 @@ It assumes that:
 - Brouyon is the only Brouyon on the folder on this computer. Two would share the temporary file that `temp_name` names.
 - The other program replaces whole files at once, as Dropbox does. A file written in place, and read half-written, is left out.
 - Handlers run one at a time on the main thread.
+- The file system can refuse to replace a file. Where it can't, such as on NFS, `move_new_in_two` looks and moves in two calls.
 
 It leaves out: several notes folders (`set_notes_dir` counts as leaving a note), Empty Trash, which asks for every note to go, seen or not, files that aren't UTF-8, text that is only white space, dates, the list, power loss, a kill before the save timer, and what Dropbox does with two versions. After a save that failed, and said so, quitting may drop the text: `may_leave` means it to.
 
@@ -94,14 +88,21 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | File | Function | In the model | Confirmed |
 |---|---|---|---|
 | `src/store.rs` | `save` | SaveRead, SaveRename | `bd105301ad82` |
-| `src/store.rs` | `remove_unchanged` | RemoveRead, RemoveUnlink | `c6da50183a28` |
-| `src/store.rs` | `create` | CreatePick, CreateRename | `92a2f2514be7` |
-| `src/store.rs` | `trash` | TrashPick, TrashRename | `32d38f03b93b` |
-| `src/store.rs` | `restore` | Restore, RestoreRename | `615e775103e0` |
-| `src/store.rs` | `purge` | Confirm | `7f78a0478a10` |
-| `src/store.rs` | `write_if` | The order of SaveRead and SaveRename, and FlushFails | `45c44445842b` |
-| `src/store.rs` | `write_atomically` | CreateRename | `3830974b9ee8` |
-| `src/store.rs` | `free_name` | FreeNames | `bd28d0617283` |
+| `src/store.rs` | `remove_unchanged` | RemoveRead, RemoveUnlink | `98f9f2fe5465` |
+| `src/store.rs` | `create` | CreateMove | `7b75029f0095` |
+| `src/store.rs` | `trash` | TrashMove | `34c47a7e06a4` |
+| `src/store.rs` | `restore` | Restore | `997d7de4b075` |
+| `src/store.rs` | `purge` | Confirm, PurgeUnlink | `99e4de9dcc8a` |
+| `src/store.rs` | `remove_if_holds` | RemoveRead, RemoveUnlink, Confirm, PurgeUnlink | `3448f6c36d85` |
+| `src/store.rs` | `gone` | RemoveRead, RemoveUnlink, PurgeUnlink | `f2b029774ab1` |
+| `src/store.rs` | `write_temp` | SaveRead, CreateMove | `43e4dce64dd1` |
+| `src/store.rs` | `replace` | SaveRename | `ccd4b6f3c93b` |
+| `src/store.rs` | `move_to_free_name` | FreeNames | `76ad09b436f2` |
+| `src/store.rs` | `move_new` | CreateMove, TrashMove, Restore | `d050286bc60f` |
+| `src/store.rs` | `move_new_in_two` | Left out: the assumption about the file system | `097c8f1da99a` |
+| `src/store.rs` | `empty_trash` | Left out: it asks for every note to go, seen or not | `d99e3e7b6230` |
+| `src/store.rs` | `write_if` | The order of SaveRead and SaveRename, and FlushFails | `2eb83e1dfa8c` |
+| `src/store.rs` | `write_atomically` | Left out: it writes the settings | `3830974b9ee8` |
 | `src/store.rs` | `temp_name` | The assumption that nothing else uses the temporary file | `2a307189254f` |
 | `src/app.rs` | `follow_editor` | Type, Compose: which changes are looked at | `df636c56308d` |
 | `src/app.rs` | `on_editor_notify` | Type, Compose, SaveTimer | `16f29149f73c` |
@@ -119,7 +120,7 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `on_editor_event` | Type | `be9c651e2b04` |
 | `src/app.rs` | `edit_list` | Type | `d0a27a483246` |
 | `src/app.rs` | `flush` | Flush, Flushed, FlushFails | `0abe040400da` |
-| `src/app.rs` | `record_save` | Saved, SavedNothing, CreateRename | `0d5ef02c6b2e` |
+| `src/app.rs` | `record_save` | Saved, SavedNothing, CreateMove | `0d5ef02c6b2e` |
 | `src/app.rs` | `select` | Select, Flushed | `17119680eb90` |
 | `src/app.rs` | `open` | Open | `bbedcfb5c190` |
 | `src/app.rs` | `replace_editor` | Open | `a27183e2caf5` |
@@ -136,13 +137,14 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `close` | Quit | `d5edd27afc85` |
 | `src/app.rs` | `on_close` | Quit | `21aa9964281f` |
 | `src/app.rs` | `step` | Select | `999d32eff226` |
-| `src/app.rs` | `move_to_trash` | MoveToTrash, Flushed, TrashPick, TrashRename | `f08dcc893178` |
+| `src/app.rs` | `move_to_trash` | MoveToTrash, Flushed, TrashMove | `f08dcc893178` |
 | `src/app.rs` | `show_notes` | ShowNotes | `dd56528f935d` |
 | `src/app.rs` | `show_trash` | ShowTrash, Flushed | `777c73bc1331` |
 | `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `a92ad4a6aa96` |
-| `src/app.rs` | `restore` | Restore, RestoreRename | `79882eef2106` |
+| `src/app.rs` | `restore` | Restore | `79882eef2106` |
+| `src/app.rs` | `ask_to_delete_forever` | Ask | `99050747308c` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
-| `src/app.rs` | `answer` | Cancel, Confirm | `93e3c4b85d1f` |
+| `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `26448ecfa9bb` |
 | `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `4a25b8dc7361` |
 | `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `c7bc29f10fbe` |
 | `src/app.rs` | `init` | Left out: it quits only when no window is open | `a8f178eebb98` |

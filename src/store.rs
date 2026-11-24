@@ -5,6 +5,7 @@ use std::{
     ffi::OsStr,
     fs::{self, File},
     io::{self, Write},
+    iter,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -129,12 +130,11 @@ impl Store {
 
     /// Creates a new note file holding `text` and returns its id.
     pub fn create(&self, text: &str) -> io::Result<NoteId> {
-        let id = free_name(
-            &self.dir,
-            &chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string(),
-        );
-        write_atomically(&self.dir, &id, text)?;
-        Ok(id)
+        let stem = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
+        let temp = write_temp(&self.dir, &stem, text)?;
+        move_to_free_name(&temp, &self.dir, &stem).inspect_err(|_| {
+            let _ = fs::remove_file(&temp);
+        })
     }
 
     /// Atomically replaces a note's contents with `text`, unless its file holds
@@ -169,45 +169,45 @@ impl Store {
     /// keeping in the trash. Returns false, leaving the file, if it holds something
     /// other than `loaded`: what was written elsewhere wasn't emptied here.
     pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<bool> {
-        let path = self.dir.join(id);
-        let gone = |result: io::Result<()>| match result {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(true),
-        };
-        match fs::read(&path) {
-            Ok(held) if held == loaded.as_bytes() => gone(fs::remove_file(&path)),
-            Ok(_) => Ok(false),
-            Err(error) => gone(Err(error)),
-        }
+        remove_if_holds(&self.dir.join(id), loaded)
     }
 
     pub fn trash(&self, id: &str) -> io::Result<NoteId> {
-        let target = free_name(&self.trash, id.strip_suffix(".md").unwrap_or(id));
-        fs::rename(self.dir.join(id), self.trash.join(&target))?;
-        Ok(target)
+        move_to_free_name(&self.dir.join(id), &self.trash, stem_of(id))
     }
 
     pub fn restore(&self, id: &str) -> io::Result<NoteId> {
-        let target = free_name(&self.dir, id.strip_suffix(".md").unwrap_or(id));
-        fs::rename(self.trash.join(id), self.dir.join(&target))?;
-        Ok(target)
+        move_to_free_name(&self.trash.join(id), &self.dir, stem_of(id))
     }
 
-    /// Permanently deletes one trashed note. One that something else already
-    /// deleted is as gone as was asked.
-    pub fn purge(&self, id: &str) -> io::Result<()> {
-        match fs::remove_file(self.trash.join(id)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        }
+    /// Permanently deletes one trashed note. Returns false, leaving the file, if it
+    /// holds something other than `shown`: nobody asked for that to go.
+    pub fn purge(&self, id: &str, shown: &str) -> io::Result<bool> {
+        remove_if_holds(&self.trash.join(id), shown)
     }
 
     /// Permanently deletes every trashed note.
     pub fn empty_trash(&self) -> io::Result<()> {
         for note in self.list_trash()? {
-            self.purge(&note.id)?;
+            gone(fs::remove_file(self.trash.join(&note.id)))?;
         }
         Ok(())
+    }
+}
+
+/// Deletes a file if it holds `text`. One that is already gone is as gone as was asked.
+fn remove_if_holds(path: &Path, text: &str) -> io::Result<bool> {
+    match fs::read(path) {
+        Ok(held) if held != text.as_bytes() => Ok(false),
+        Ok(_) => gone(fs::remove_file(path)).map(|()| true),
+        Err(error) => gone(Err(error)).map(|()| true),
+    }
+}
+
+fn gone(removed: io::Result<()>) -> io::Result<()> {
+    match removed {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -228,38 +228,80 @@ fn write_if(
     text: &str,
     may_replace: impl FnOnce() -> io::Result<bool>,
 ) -> io::Result<bool> {
-    let temp = dir.join(temp_name(name));
-    let result = (|| {
-        let mut file = File::create(&temp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        if !may_replace()? {
-            return Ok(false);
+    let temp = write_temp(dir, name, text)?;
+    let result = may_replace().and_then(|may| {
+        if may {
+            replace(&temp, &dir.join(name))?;
         }
-        fs::rename(&temp, dir.join(name))?;
-        Ok(true)
-    })();
+        Ok(may)
+    });
     if !matches!(result, Ok(true)) {
         let _ = fs::remove_file(&temp);
     }
     result
 }
 
-fn temp_name(name: &str) -> String {
-    format!("{TEMP_PREFIX}{name}.tmp")
+fn write_temp(dir: &Path, name: &str, text: &str) -> io::Result<PathBuf> {
+    let temp = dir.join(temp_name(name));
+    let written = (|| {
+        let mut file = File::create(&temp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    })();
+    match written {
+        Ok(()) => Ok(temp),
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(error)
+        }
+    }
 }
 
-/// A file name free in `dir`, so moving or creating a note never overwrites one.
-fn free_name(dir: &Path, stem: &str) -> NoteId {
-    let free = |id: &str| !dir.join(id).exists();
-    let id = format!("{stem}.{EXTENSION}");
-    if free(&id) {
-        return id;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a save replaces the file it compared"
+)]
+fn replace(temp: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(temp, target)
+}
+
+/// Moves a file to a name that nothing has, in one system call, so that nothing can take
+/// the name in between.
+fn move_new(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::{fs, io::Errno};
+    match fs::renameat_with(fs::CWD, from, fs::CWD, to, fs::RenameFlags::NOREPLACE) {
+        Err(Errno::INVAL | Errno::NOSYS | Errno::NOTSUP) => move_new_in_two(from, to),
+        moved => Ok(moved?),
     }
-    (2..)
-        .map(|n| format!("{stem}-{n}.{EXTENSION}"))
-        .find(|id| free(id))
-        .expect("an unbounded range always finds a free name")
+}
+
+/// For a folder whose file system can't refuse to replace, such as NFS.
+#[expect(clippy::disallowed_methods, reason = "asked just before")]
+fn move_new_in_two(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    fs::rename(from, to)
+}
+
+/// Moves a file into `dir` under `stem`, or the first numbered name that is free.
+fn move_to_free_name(from: &Path, dir: &Path, stem: &str) -> io::Result<NoteId> {
+    let numbered = (2..).map(|n| format!("{stem}-{n}.{EXTENSION}"));
+    for id in iter::once(format!("{stem}.{EXTENSION}")).chain(numbered) {
+        match move_new(from, &dir.join(&id)) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            moved => return moved.map(|()| id),
+        }
+    }
+    unreachable!("an unbounded range always has another name")
+}
+
+fn stem_of(id: &str) -> &str {
+    id.strip_suffix(".md").unwrap_or(id)
+}
+
+fn temp_name(name: &str) -> String {
+    format!("{TEMP_PREFIX}{name}.tmp")
 }
 
 fn scan(dir: &Path) -> io::Result<Vec<Note>> {
@@ -607,6 +649,52 @@ mod tests {
     }
 
     #[test]
+    fn a_name_taken_in_the_meantime_is_never_replaced() {
+        let (dir, _store) = store();
+        let (from, taken) = (dir.path().join("from"), dir.path().join("taken.md"));
+        fs::write(&from, "mine").unwrap();
+        fs::write(&taken, "theirs").unwrap();
+        for attempt in [move_new, move_new_in_two] {
+            let error = attempt(&from, &taken).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(fs::read_to_string(&taken).unwrap(), "theirs");
+        }
+        assert_eq!(
+            move_to_free_name(&from, dir.path(), "taken").unwrap(),
+            "taken-2.md"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("taken-2.md")).unwrap(),
+            "mine"
+        );
+    }
+
+    #[test]
+    fn this_file_system_can_refuse_to_replace() {
+        use rustix::{fs as raw, io::Errno};
+        let (dir, _store) = store();
+        let (from, taken) = (dir.path().join("from"), dir.path().join("taken"));
+        fs::write(&from, "").unwrap();
+        fs::write(&taken, "").unwrap();
+        let moved = raw::renameat_with(
+            raw::CWD,
+            &from,
+            raw::CWD,
+            &taken,
+            raw::RenameFlags::NOREPLACE,
+        );
+        assert_eq!(moved, Err(Errno::EXIST));
+    }
+
+    #[test]
+    fn purging_leaves_a_note_that_holds_something_else() {
+        let (dir, store) = store();
+        fs::write(dir.path().join(".trash/one.md"), "theirs").unwrap();
+        assert!(!store.purge("one.md", "shown").unwrap());
+        assert_eq!(store.read_trashed("one.md").unwrap(), "theirs");
+    }
+
+    #[test]
     fn purge_and_empty_trash_only_touch_the_trash() {
         let (_dir, store) = store();
         let kept = store.create("kept").unwrap();
@@ -615,7 +703,8 @@ mod tests {
             store.trash(&id).unwrap();
         }
         let first = store.list_trash().unwrap()[0].id.clone();
-        store.purge(&first).unwrap();
+        let shown = store.read_trashed(&first).unwrap();
+        assert!(store.purge(&first, &shown).unwrap());
         assert_eq!(store.list_trash().unwrap().len(), 2);
         store.empty_trash().unwrap();
         assert!(store.list_trash().unwrap().is_empty());
@@ -628,7 +717,7 @@ mod tests {
         fs::write(dir.path().join(".trash/one.md"), "one").unwrap();
         fs::write(dir.path().join(".trash/two.md"), "two").unwrap();
         fs::remove_file(dir.path().join(".trash/one.md")).unwrap();
-        store.purge("one.md").unwrap();
+        assert!(store.purge("one.md", "one").unwrap());
         assert_eq!(store.list_trash().unwrap().len(), 1);
     }
 
