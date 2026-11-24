@@ -3,15 +3,15 @@ Run: tools/lint
 Says: none of its paths says
 
 diff --git i/src/watch.rs w/src/watch.rs
-index 828d03d..5390993 100644
+index 2bb4f51..5d9958a 100644
 --- i/src/watch.rs
 +++ w/src/watch.rs
-@@ -11,7 +11,7 @@ use std::{
+@@ -7,7 +7,7 @@ use std::{
+     path::{Path, PathBuf},
  };
  
- /// Watches folders rather than files, so atomic saves and replaced folders survive.
 -/// Adapted from gpui-omarchy's palette watcher, which is private to that crate.
 +/// Seen in other projects too.
  pub struct FolderWatcher {
      watcher: RecommendedWatcher,
-     armed: BTreeMap<PathBuf, Identity>,
+     changes: async_channel::Receiver<()>,

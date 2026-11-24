@@ -10,6 +10,8 @@ use std::{
 /// Adapted from gpui-omarchy's palette watcher, which is private to that crate.
 pub struct FolderWatcher {
     watcher: RecommendedWatcher,
+    changes: async_channel::Receiver<()>,
+    folders: Vec<PathBuf>,
     armed: BTreeMap<PathBuf, Identity>,
     parents: bool,
 }
@@ -23,11 +25,8 @@ impl FolderWatcher {
     /// replaced, and so is the nearest ancestor of a missing one, which sees it
     /// appear. That suits small folders that come and go. It doesn't suit the notes:
     /// their parent can be a whole synced folder, which a Mac reports on in full.
-    pub fn new(
-        folders: &[PathBuf],
-        parents: bool,
-    ) -> notify::Result<(Self, async_channel::Receiver<()>)> {
-        let (sender, receiver) = async_channel::bounded(1);
+    pub fn new(folders: Vec<PathBuf>, parents: bool) -> notify::Result<Self> {
+        let (sender, changes) = async_channel::bounded(1);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if !matches!(&event, Ok(event) if is_noise(event)) {
                 let _ = sender.try_send(());
@@ -35,16 +34,27 @@ impl FolderWatcher {
         })?;
         let mut watcher = Self {
             watcher,
+            changes,
+            folders,
             armed: BTreeMap::new(),
             parents,
         };
-        watcher.arm(folders);
-        Ok((watcher, receiver))
+        watcher.arm();
+        Ok(watcher)
     }
 
-    pub fn arm(&mut self, folders: &[PathBuf]) {
+    /// Returns once a change has settled and the folders are watched as they are by then,
+    /// so that nothing read afterwards changes unseen.
+    pub async fn changed<Settled: Future>(&mut self, settle: impl FnOnce() -> Settled) {
+        let _ = self.changes.recv().await;
+        settle().await;
+        while self.changes.try_recv().is_ok() {}
+        self.arm();
+    }
+
+    fn arm(&mut self) {
         let mut wanted = BTreeMap::new();
-        for folder in folders {
+        for folder in &self.folders {
             if !self.parents {
                 if folder.is_dir() {
                     add_folder(folder, &mut wanted);
@@ -100,7 +110,10 @@ fn add_folder(path: &Path, folders: &mut BTreeMap<PathBuf, Identity>) {
 
 #[cfg(test)]
 pub(crate) mod testing {
+    use super::FolderWatcher;
     use std::{
+        pin::pin,
+        task::{Context, Waker},
         thread,
         time::{Duration, Instant},
     };
@@ -124,6 +137,20 @@ pub(crate) mod testing {
         thread::sleep(QUIET);
         assert!(events.try_recv().is_err(), "an event arrived");
     }
+
+    pub(crate) fn events(watcher: &FolderWatcher) -> async_channel::Receiver<()> {
+        watcher.changes.clone()
+    }
+
+    pub(crate) fn take_change(watcher: &mut FolderWatcher) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut changed = pin!(watcher.changed(|| async { thread::sleep(QUIET) }));
+        let mut cx = Context::from_waker(Waker::noop());
+        while changed.as_mut().poll(&mut cx).is_pending() {
+            assert!(Instant::now() < deadline, "no change arrived");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -139,7 +166,8 @@ mod tests {
     }
 
     fn watch(store: &Store) -> (FolderWatcher, async_channel::Receiver<()>) {
-        let (watcher, events) = FolderWatcher::new(&store.folders(), false).unwrap();
+        let watcher = FolderWatcher::new(store.folders(), false).unwrap();
+        let events = events(&watcher);
         settle(&events);
         (watcher, events)
     }

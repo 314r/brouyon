@@ -8,7 +8,7 @@ use crate::{
     macos, markdown,
     settings::{self, SettingsWindow},
     shortcuts::{self, primary},
-    store::{self, Note, NoteId, Saved, Store},
+    store::{self, Note, NoteId, Removed, Saved, Store},
     title_bar::{self, BAR_HEIGHT, TitleBar},
     watch::FolderWatcher,
 };
@@ -260,7 +260,7 @@ enum Flushed {
 
 #[derive(Clone)]
 enum Confirm {
-    DeleteForever(NoteId, SharedString),
+    DeleteForever { id: NoteId, shown: SharedString },
     EmptyTrash,
 }
 
@@ -518,8 +518,8 @@ impl Brouyon {
                 self.store
                     .remove_unchanged(id, loaded)
                     .map(|removed| match removed {
-                        true => Flushed::Removed,
-                        false => Flushed::KeptTheirs,
+                        Removed::Gone => Flushed::Removed,
+                        Removed::Changed => Flushed::KeptTheirs,
                     })
             }
             Selection::Note(id) => match self.store.save(id, loaded, &text) {
@@ -715,13 +715,12 @@ impl Brouyon {
     }
 
     pub fn watch_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let folders = self.store.folders();
-        self.notes_watch = match FolderWatcher::new(&folders, false) {
-            Ok((mut watcher, events)) => Some(cx.spawn_in(window, async move |this, cx| {
-                while events.recv().await.is_ok() {
-                    cx.background_executor().timer(FOLDER_SETTLE).await;
-                    while events.try_recv().is_ok() {}
-                    watcher.arm(&folders);
+        self.notes_watch = match FolderWatcher::new(self.store.folders(), false) {
+            Ok(mut watcher) => Some(cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    watcher
+                        .changed(|| cx.background_executor().timer(FOLDER_SETTLE))
+                        .await;
                     let synced =
                         this.update_in(cx, |this, window, cx| this.sync_with_disk(window, cx));
                     if synced.is_err() {
@@ -987,7 +986,14 @@ impl Brouyon {
     }
 
     fn ask_to_delete_forever(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
-        self.ask(Confirm::DeleteForever(id, self.seen.clone()), window, cx);
+        self.ask(
+            Confirm::DeleteForever {
+                id,
+                shown: self.seen.clone(),
+            },
+            window,
+            cx,
+        );
     }
 
     fn dialog_is_open(&self) -> bool {
@@ -1011,13 +1017,13 @@ impl Brouyon {
         };
         if confirmed && let Some(kept) = self.flush(cx) {
             let result = match &confirm {
-                Confirm::DeleteForever(id, shown) => self.store.purge(id, shown),
-                Confirm::EmptyTrash => self.store.empty_trash().map(|()| true),
+                Confirm::DeleteForever { id, shown } => self.store.purge(id, shown),
+                Confirm::EmptyTrash => self.store.empty_trash().map(|()| Removed::Gone),
             };
             self.reload_lists();
             match result {
-                Ok(true) => self.show_next_trashed(kept, window, cx),
-                Ok(false) => {
+                Ok(Removed::Gone) => self.show_next_trashed(kept, window, cx),
+                Ok(Removed::Changed) => {
                     self.open(self.selection.clone(), kept, window, cx);
                     self.say("Changed elsewhere, so it wasn't deleted.", cx);
                 }
@@ -1668,7 +1674,7 @@ impl Brouyon {
     fn confirm_dialog(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let confirm = self.confirm.as_ref()?;
         let (title, description, label) = match confirm {
-            Confirm::DeleteForever(..) => (
+            Confirm::DeleteForever { .. } => (
                 "Delete this note forever?",
                 "This removes its file from the Trash and can't be undone.",
                 "Delete forever",
@@ -2521,6 +2527,17 @@ pub(crate) mod tests {
         }
         keys(cx, "right shift-down");
         assert_eq!(date_once_left(cx), date);
+    }
+
+    #[gpui_kit::test]
+    fn choosing_the_open_note_again_keeps_its_cursor_and_undo(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        type_and_save(cx, "one two");
+        keys(cx, "left left");
+        click("note-row-0", cx);
+        assert_eq!(cursor(&view, cx), 5);
+        keys(cx, "ctrl-z");
+        assert_eq!(editor_text(&view, cx), "");
     }
 
     #[gpui_kit::test]
@@ -3536,6 +3553,23 @@ pub(crate) mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_copy_menu_does_not_come_back_open(cx: &mut TestAppContext) {
+        let (_dir, _view, cx) = open_marked_up(cx);
+        keys(cx, "ctrl-shift-backspace");
+        keys(cx, "ctrl-shift-t");
+        click("copy-as", cx);
+        let menu_is_open =
+            |cx: &mut VisualTestContext| cx.debug_bounds("omarchy-menu-content").is_some();
+        assert!(menu_is_open(cx));
+        for (width, height) in [(480., 420.), (1060., 760.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            draw(cx);
+            draw(cx);
+            assert!(!menu_is_open(cx), "{width} px wide");
+        }
+    }
+
+    #[gpui_kit::test]
     fn the_strip_counts_the_words_as_they_are_typed(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open_marked_up(cx);
         let words = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).words);
@@ -3744,6 +3778,18 @@ pub(crate) mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_failed_save_that_was_said_lets_a_close_through_whatever_is_typed_since(
+        cx: &mut TestAppContext,
+    ) {
+        let (dir, _view, cx) = open(cx);
+        fs::remove_dir_all(dir.path()).unwrap();
+        cx.simulate_input("precious");
+        assert!(!cx.simulate_close(), "it hasn't been said yet");
+        cx.simulate_input(" and more");
+        assert!(cx.simulate_close());
+    }
+
+    #[gpui_kit::test]
     fn closing_shows_a_failed_save_even_after_another_problem(cx: &mut TestAppContext) {
         let (dir, view, cx) = open(cx);
         type_and_save(cx, "first");
@@ -3871,6 +3917,40 @@ pub(crate) mod tests {
 
         delete(cx);
         assert!(trashed_texts(dir.path()).is_empty(), "now it was shown");
+    }
+
+    #[gpui_kit::test]
+    fn a_note_that_cannot_be_read_just_now_stays_open(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "mine");
+        fs::write(&path, "readable again").unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "readable again");
+    }
+
+    #[gpui_kit::test]
+    fn a_trash_folder_that_was_replaced_is_still_followed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (dir, view, cx) = open(cx);
+        view.update_in(cx, |this, window, cx| this.watch_notes(window, cx));
+        let until_trashed = |cx: &mut VisualTestContext, count: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while cx.update(|_, cx| view.read(cx).trash.len()) != count {
+                assert!(std::time::Instant::now() < deadline, "{count} never showed");
+                std::thread::sleep(Duration::from_millis(10));
+                wait(cx, FOLDER_SETTLE);
+            }
+        };
+        let trash = dir.path().join(".trash");
+        fs::remove_dir_all(&trash).unwrap();
+        fs::create_dir(&trash).unwrap();
+        fs::write(trash.join("one.md"), "one").unwrap();
+        until_trashed(cx, 1);
+        fs::write(trash.join("two.md"), "two").unwrap();
+        until_trashed(cx, 2);
     }
 
     #[gpui_kit::test]

@@ -3,8 +3,6 @@
     allow(clippy::disallowed_methods, reason = "#[gpui_kit::test] quits")
 )]
 
-extern crate gpui_kit as gpui;
-
 mod app;
 mod assets;
 mod checked;

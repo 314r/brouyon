@@ -3,11 +3,11 @@ Run: cargo check --locked --quiet
 Says: expected `NotesDir`, found `PathBuf`
 
 diff --git i/src/config.rs w/src/config.rs
-index 1ceaaac..77d3e28 100644
+index 6bf5222..e1f019c 100644
 --- i/src/config.rs
 +++ w/src/config.rs
-@@ -107,13 +107,11 @@ impl Config {
-         // so notes never land in whichever folder the app was launched from.
+@@ -96,13 +96,11 @@ impl Config {
+         let default_notes_dir = NotesDir::new(data_home.join("brouyon"));
          let notes_dir = file
              .notes_dir
 -            .filter(|dir| !dir.is_empty())

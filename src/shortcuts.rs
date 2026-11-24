@@ -46,3 +46,33 @@ pub const ALL: [(&str, &str); 13] = [
     (SHORTCUTS, "These shortcuts"),
     (QUIT, "Quit"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_documentation_lists_the_same_keys() {
+        if MAC {
+            return;
+        }
+        let table = include_str!("../DOC.md")
+            .split_once("| Key | Action |")
+            .and_then(|(_, rest)| rest.split_once("\n\n"))
+            .expect("DOC.md has the table")
+            .0;
+        let documented: Vec<_> = table
+            .lines()
+            .filter(|row| row.starts_with("| `"))
+            .map(|row| row.split(" | ").next().unwrap().replace(['|', '`'], ""))
+            .collect();
+        for (number, (keys, action)) in ALL.iter().enumerate() {
+            let row = documented.get(number).map_or("", |row| row.trim());
+            assert!(
+                row.starts_with(keys),
+                "{action}: {keys} in the window, {row} in DOC.md"
+            );
+        }
+        assert_eq!(documented.len(), ALL.len());
+    }
+}

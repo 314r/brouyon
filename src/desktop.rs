@@ -135,11 +135,11 @@ pub fn init(cx: &mut App) {
 
 pub fn follow(cx: &mut App) {
     let paths = Paths::from_env();
-    let watcher = FolderWatcher::new(&paths.folders(), true);
+    let watcher = FolderWatcher::new(paths.folders().to_vec(), true);
     let mut fonts = fonts_stamp(&paths);
     let mut desktop = Desktop::read(&paths);
     cx.set_global(desktop.clone());
-    let (mut watcher, events) = match watcher {
+    let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
             eprintln!("brouyon: can't watch the desktop's settings: {error}");
@@ -147,20 +147,16 @@ pub fn follow(cx: &mut App) {
         }
     };
     cx.spawn(async move |cx| {
-        while events.recv().await.is_ok() {
-            cx.background_executor().timer(SETTLE).await;
-            while events.try_recv().is_ok() {}
+        loop {
+            watcher
+                .changed(|| cx.background_executor().timer(SETTLE))
+                .await;
             let paths = paths.clone();
             let previous = desktop.clone();
-            let (next_watcher, next_fonts, next) = cx
+            let (next, next_fonts) = cx
                 .background_executor()
-                .spawn(async move {
-                    watcher.arm(&paths.folders());
-                    let (next, fonts) = reread(&paths, &previous, fonts, monospace_family);
-                    (watcher, fonts, next)
-                })
+                .spawn(async move { reread(&paths, &previous, fonts, monospace_family) })
                 .await;
-            watcher = next_watcher;
             fonts = next_fonts;
             if next != desktop {
                 desktop = next.clone();
@@ -292,7 +288,7 @@ fn text_scale_from(shell_toml: &str) -> Option<TextScale> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::watch::testing::{nothing_arrives, settle, wait_for_event};
+    use crate::watch::testing::{events, nothing_arrives, settle, take_change, wait_for_event};
 
     fn omarchy() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
@@ -452,7 +448,9 @@ mod tests {
     }
 
     fn watch(paths: &Paths) -> (FolderWatcher, async_channel::Receiver<()>) {
-        FolderWatcher::new(&paths.folders(), true).unwrap()
+        let watcher = FolderWatcher::new(paths.folders().to_vec(), true).unwrap();
+        let events = events(&watcher);
+        (watcher, events)
     }
 
     #[test]
@@ -471,9 +469,7 @@ mod tests {
         let (mut watcher, events) = watch(&paths);
 
         fs::create_dir_all(&paths.toggles).unwrap();
-        wait_for_event(&events);
-        settle(&events);
-        watcher.arm(&paths.folders());
+        take_change(&mut watcher);
 
         touch(paths.toggles.join("window-glassy.lua"));
         wait_for_event(&events);
@@ -489,9 +485,7 @@ mod tests {
         fs::create_dir_all(&next).unwrap();
         fs::remove_dir_all(paths.theme()).unwrap();
         fs::rename(&next, paths.theme()).unwrap();
-        wait_for_event(&events);
-        settle(&events);
-        watcher.arm(&paths.folders());
+        take_change(&mut watcher);
 
         fs::write(paths.theme().join("shell.toml"), "[font]\nbase-size = 18").unwrap();
         wait_for_event(&events);

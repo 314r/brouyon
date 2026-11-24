@@ -71,6 +71,13 @@ pub enum Saved {
     Changed,
 }
 
+/// What became of a file that was to go if it still held what the user had seen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Removed {
+    Gone,
+    Changed,
+}
+
 pub struct Store {
     dir: PathBuf,
     trash: PathBuf,
@@ -144,7 +151,7 @@ impl Store {
         })
     }
 
-    pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<bool> {
+    pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<Removed> {
         remove_if_holds(&self.dir.join(id), loaded)
     }
 
@@ -156,7 +163,7 @@ impl Store {
         move_to_free_name(&self.trash.join(id), &self.dir, stem_of(id))
     }
 
-    pub fn purge(&self, id: &str, shown: &str) -> io::Result<bool> {
+    pub fn purge(&self, id: &str, shown: &str) -> io::Result<Removed> {
         remove_if_holds(&self.trash.join(id), shown)
     }
 
@@ -168,11 +175,11 @@ impl Store {
     }
 }
 
-fn remove_if_holds(path: &Path, text: &str) -> io::Result<bool> {
+fn remove_if_holds(path: &Path, text: &str) -> io::Result<Removed> {
     match fs::read(path) {
-        Ok(held) if held != text.as_bytes() => Ok(false),
-        Ok(_) => gone(fs::remove_file(path)).map(|()| true),
-        Err(error) => gone(Err(error)).map(|()| true),
+        Ok(held) if held != text.as_bytes() => Ok(Removed::Changed),
+        Ok(_) => gone(fs::remove_file(path)).map(|()| Removed::Gone),
+        Err(error) => gone(Err(error)).map(|()| Removed::Gone),
     }
 }
 
@@ -569,13 +576,20 @@ mod tests {
         let (dir, store) = store();
         let id = store.create("as loaded").unwrap();
         fs::write(dir.path().join(&id), "changed elsewhere").unwrap();
-        assert!(!store.remove_unchanged(&id, "as loaded").unwrap());
+        assert_eq!(
+            store.remove_unchanged(&id, "as loaded").unwrap(),
+            Removed::Changed
+        );
         assert_eq!(store.read(&id).unwrap(), "changed elsewhere");
 
-        assert!(store.remove_unchanged(&id, "changed elsewhere").unwrap());
-        assert!(files(dir.path()).is_empty());
-        assert!(
+        assert_eq!(
             store.remove_unchanged(&id, "changed elsewhere").unwrap(),
+            Removed::Gone
+        );
+        assert!(files(dir.path()).is_empty());
+        assert_eq!(
+            store.remove_unchanged(&id, "changed elsewhere").unwrap(),
+            Removed::Gone,
             "one already gone is as gone as was asked"
         );
     }
@@ -680,7 +694,7 @@ mod tests {
     fn purging_leaves_a_note_that_holds_something_else() {
         let (dir, store) = store();
         fs::write(dir.path().join(".trash/one.md"), "theirs").unwrap();
-        assert!(!store.purge("one.md", "shown").unwrap());
+        assert_eq!(store.purge("one.md", "shown").unwrap(), Removed::Changed);
         assert_eq!(store.read_trashed("one.md").unwrap(), "theirs");
     }
 
@@ -694,7 +708,7 @@ mod tests {
         }
         let first = store.list_trash().unwrap()[0].id.clone();
         let shown = store.read_trashed(&first).unwrap();
-        assert!(store.purge(&first, &shown).unwrap());
+        assert_eq!(store.purge(&first, &shown).unwrap(), Removed::Gone);
         assert_eq!(store.list_trash().unwrap().len(), 2);
         store.empty_trash().unwrap();
         assert!(store.list_trash().unwrap().is_empty());
@@ -707,7 +721,7 @@ mod tests {
         fs::write(dir.path().join(".trash/one.md"), "one").unwrap();
         fs::write(dir.path().join(".trash/two.md"), "two").unwrap();
         fs::remove_file(dir.path().join(".trash/one.md")).unwrap();
-        assert!(store.purge("one.md", "one").unwrap());
+        assert_eq!(store.purge("one.md", "one").unwrap(), Removed::Gone);
         assert_eq!(store.list_trash().unwrap().len(), 1);
     }
 

@@ -88,12 +88,12 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | File | Function | In the model | Confirmed |
 |---|---|---|---|
 | `src/store.rs` | `save` | SaveRead, SaveRename | `bd105301ad82` |
-| `src/store.rs` | `remove_unchanged` | RemoveRead, RemoveUnlink | `98f9f2fe5465` |
+| `src/store.rs` | `remove_unchanged` | RemoveRead, RemoveUnlink | `fa757478bd8b` |
 | `src/store.rs` | `create` | CreateMove | `7b75029f0095` |
 | `src/store.rs` | `trash` | TrashMove | `34c47a7e06a4` |
 | `src/store.rs` | `restore` | Restore | `997d7de4b075` |
-| `src/store.rs` | `purge` | Confirm, PurgeUnlink | `99e4de9dcc8a` |
-| `src/store.rs` | `remove_if_holds` | RemoveRead, RemoveUnlink, Confirm, PurgeUnlink | `3448f6c36d85` |
+| `src/store.rs` | `purge` | Confirm, PurgeUnlink | `ec6db3b637aa` |
+| `src/store.rs` | `remove_if_holds` | RemoveRead, RemoveUnlink, Confirm, PurgeUnlink | `1dbdd4a8fefc` |
 | `src/store.rs` | `gone` | RemoveRead, RemoveUnlink, PurgeUnlink | `f2b029774ab1` |
 | `src/store.rs` | `write_temp` | SaveRead, CreateMove | `43e4dce64dd1` |
 | `src/store.rs` | `replace` | SaveRename | `ccd4b6f3c93b` |
@@ -119,7 +119,7 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/kept.rs` | `close_textless` | Left out: it closes Settings | `cbda49437f0b` |
 | `src/app.rs` | `on_editor_event` | Type | `be9c651e2b04` |
 | `src/app.rs` | `edit_list` | Type | `d0a27a483246` |
-| `src/app.rs` | `flush` | Flush, Flushed, FlushFails | `0abe040400da` |
+| `src/app.rs` | `flush` | Flush, Flushed, FlushFails | `fca1bc6bfeaf` |
 | `src/app.rs` | `record_save` | Saved, SavedNothing, CreateMove | `dc99e76dcf49` |
 | `src/app.rs` | `select` | Select, Flushed | `17119680eb90` |
 | `src/app.rs` | `open` | Open | `5955c840616a` |
@@ -128,7 +128,7 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `on_activation` | LoseFocus, Sync | `d337ffe4d03f` |
 | `src/app.rs` | `loaded_now` | Open, RefreshNote | `839318b7a1a9` |
 | `src/app.rs` | `sync_with_disk` | Sync | `99f6dd0ecf09` |
-| `src/app.rs` | `watch_notes` | Sync | `be87c15597b6` |
+| `src/app.rs` | `watch_notes` | Sync | `9a0f92c47a15` |
 | `src/app.rs` | `refresh_open_note` | RefreshOpenNote, RefreshNote | `d11ba63e9cb7` |
 | `src/app.rs` | `show_in_place` | ShowInPlace | `f0c5ce121cac` |
 | `src/app.rs` | `may_leave` | Quit, FlushFails | `cde3598f99a4` |
@@ -142,9 +142,9 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `show_trash` | ShowTrash, Flushed | `777c73bc1331` |
 | `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `76a31ce6c5c9` |
 | `src/app.rs` | `restore` | Restore | `79882eef2106` |
-| `src/app.rs` | `ask_to_delete_forever` | Ask | `cda0763f0d51` |
+| `src/app.rs` | `ask_to_delete_forever` | Ask | `b669c2862166` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
-| `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `26448ecfa9bb` |
+| `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `fec7149f72c2` |
 | `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `d99638780c0e` |
 | `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `7ed04ac8791b` |
 | `src/app.rs` | `init` | Left out: it quits only when no window is open | `a8f178eebb98` |

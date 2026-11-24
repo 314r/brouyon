@@ -1,4 +1,4 @@
-use crate::{look::MAC, macos};
+use crate::{config::BASE_REM_SIZE, look::MAC, macos};
 use gpui_kit::{
     Div, MouseButton, Pixels, Point, TitlebarOptions, Window, div, point, prelude::*, px,
 };
@@ -12,13 +12,12 @@ const BUTTONS_WIDTH: f32 = 3. * 14. + 2. * 6.;
 const BUTTONS_HEIGHT: f32 = 14.;
 const BUTTONS_LEFT: f32 = 16.;
 const AFTER_BUTTONS: f32 = 24.;
-const DEFAULT_REM: f32 = 16.;
 
 pub fn options() -> Option<TitlebarOptions> {
     DRAWN.then(|| TitlebarOptions {
         title: None,
         appears_transparent: true,
-        traffic_light_position: Some(buttons_at(px(BAR_HEIGHT * DEFAULT_REM))),
+        traffic_light_position: Some(buttons_at(px(BAR_HEIGHT * BASE_REM_SIZE))),
     })
 }
 

@@ -11,7 +11,7 @@ use toml_edit::DocumentMut;
 
 const DEFAULT_IDLE_MINUTES: f64 = 5.;
 /// The size gpui-omarchy's metrics assume, matching Omarchy's default text size.
-const BASE_REM_SIZE: f32 = 16.;
+pub const BASE_REM_SIZE: f32 = 16.;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
