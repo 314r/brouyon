@@ -436,12 +436,12 @@ impl SettingsWindow {
             )
             .child(
                 section("Blank note", cx)
-                    .child(div().w(rems(15.)).child(select(
-                        "idle-choice",
-                        &self.idle_choice,
-                        window,
-                        cx,
-                    )))
+                    .child(
+                        div()
+                            .debug_selector(|| "idle-choice".into())
+                            .w(rems(15.))
+                            .child(select("idle-choice", &self.idle_choice, window, cx)),
+                    )
                     .child(description(
                         "When nothing is typed or clicked for this long, Brouyon saves the note \
                          and puts a blank one in its place, as when it opens.",
@@ -644,7 +644,7 @@ impl SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{draw, keys, on_this_system, open, open_with, type_and_save};
+    use crate::app::tests::{draw, is_said, keys, on_this_system, open, open_with, type_and_save};
     use crate::checked::TextScale;
     use crate::config::Config;
     use crate::desktop::Transparency;
@@ -693,15 +693,9 @@ mod tests {
         cx.update(|_, cx| settings.update(cx, |_, _, _| ()).is_ok())
     }
 
-    fn focus_idle_choice(settings: WindowHandle<SettingsWindow>, cx: &mut VisualTestContext) {
+    fn open_idle_list(cx: &mut VisualTestContext) {
         click("section-Notes", cx);
-        settings
-            .update(cx, |this, window, cx| {
-                let focus = this.idle_choice.read(cx).focus_handle(cx);
-                focus.focus(window, cx);
-            })
-            .unwrap();
-        draw(cx);
+        click("idle-choice", cx);
     }
 
     #[gpui_kit::test]
@@ -793,6 +787,8 @@ mod tests {
         cx.simulate_input("precious");
         closing_keys("ctrl-q", &mut settings_cx);
         cx.update(|_, cx| assert!(view.read(cx).has_problem()));
+        draw(cx);
+        assert!(is_said("status-problem", cx));
     }
 
     #[gpui_kit::test]
@@ -811,13 +807,9 @@ mod tests {
     fn escape_closes_an_open_list_before_the_window(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (settings, mut settings_cx) = open_settings(&view, cx);
-        focus_idle_choice(settings, &mut settings_cx);
-        keys(&mut settings_cx, "enter");
-        let list_is_open = |cx: &mut VisualTestContext| {
-            settings
-                .update(cx, |this, _, cx| this.idle_choice.read(cx).is_open())
-                .unwrap()
-        };
+        open_idle_list(&mut settings_cx);
+        let list_is_open =
+            |cx: &mut VisualTestContext| cx.debug_bounds("omarchy-choice-popup").is_some();
         assert!(list_is_open(&mut settings_cx));
 
         keys(&mut settings_cx, "escape");
@@ -878,31 +870,17 @@ mod tests {
     fn choosing_a_theme_applies_and_saves_it(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         let (_settings, mut settings_cx) = open_settings(&view, cx);
-
-        click("theme-Light", &mut settings_cx);
-        cx.update(|_, cx| assert_eq!(cx.omarchy().name, Theme::flexoki_light().name));
-        assert!(config(&view, cx).saved_text().contains("theme = \"light\""));
-
-        click("theme-Dark", &mut settings_cx);
-        cx.update(|_, cx| assert_eq!(cx.omarchy().name, Theme::tokyo_night().name));
-        assert!(config(&view, cx).saved_text().contains("theme = \"dark\""));
-
-        click("theme-Omarchy", &mut settings_cx);
-        cx.update(|_, cx| assert_eq!(cx.omarchy().name, Theme::system_or_default().name));
-        assert!(
-            config(&view, cx)
-                .saved_text()
-                .contains("theme = \"omarchy\"")
-        );
-    }
-
-    #[gpui_kit::test]
-    fn every_theme_keeps_the_mono_font_on_widgets(cx: &mut TestAppContext) {
-        let (_dir, view, cx) = open(cx);
-        for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
-            view.update(cx, |this, cx| this.set_theme(mode, cx));
-            cx.run_until_parked();
-            cx.update(|_, cx| assert_eq!(cx.omarchy().font, cx.omarchy().mono_font));
+        for (button, saved, theme) in [
+            ("theme-Light", "light", Theme::flexoki_light()),
+            ("theme-Dark", "dark", Theme::tokyo_night()),
+            // Without Omarchy, its theme is Dark's: going from one to the other shows nothing.
+            ("theme-Light", "light", Theme::flexoki_light()),
+            ("theme-Omarchy", "omarchy", Theme::system_or_default()),
+        ] {
+            click(button, &mut settings_cx);
+            cx.update(|_, cx| assert_eq!(cx.omarchy().name, theme.name));
+            let saved = format!("theme = \"{saved}\"");
+            assert!(config(&view, cx).saved_text().contains(&saved), "{saved}");
         }
     }
 
@@ -972,11 +950,11 @@ mod tests {
     fn choosing_a_delay_saves_it_and_it_applies_at_once(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         type_and_save(cx, "a note");
-        let (settings, mut settings_cx) = open_settings(&view, cx);
-        focus_idle_choice(settings, &mut settings_cx);
+        let (_settings, mut settings_cx) = open_settings(&view, cx);
+        open_idle_list(&mut settings_cx);
 
-        // The list opens on the current delay, 5 minutes: two up is 1 minute.
-        keys(&mut settings_cx, "enter up up enter");
+        // A key opens it again, on the current delay, 5 minutes: two up is 1 minute.
+        keys(&mut settings_cx, "escape enter up up enter");
         assert_eq!(
             config(&view, cx).idle.map(IdleDelay::get),
             Some(Duration::from_secs(60))
@@ -996,23 +974,43 @@ mod tests {
         cx.update(|_, cx| assert!(!view.read(cx).is_blank()));
     }
 
-    #[test]
-    fn a_delay_set_by_hand_is_offered_too() {
-        let options = idle_options(IdleDelay::from_minutes(0.1));
-        assert_eq!(options.len(), IDLE_MINUTES.len() + 1);
-        assert_eq!(options[0], None);
-        assert_eq!(options[1].map(IdleDelay::get), Some(Duration::from_secs(6)));
-        assert_eq!(idle_label(options[1]), "After 6 seconds");
-        assert_eq!(
-            idle_options(IdleDelay::from_minutes(5.)).len(),
-            IDLE_MINUTES.len(),
+    #[gpui_kit::test]
+    fn a_delay_set_by_hand_is_offered_too(cx: &mut TestAppContext) {
+        let (_dir, view, cx) = open(cx);
+        let open_list = |minutes, cx: &mut VisualTestContext| {
+            let delay = IdleDelay::from_minutes(minutes);
+            cx.update(|window, cx| view.update(cx, |this, cx| this.set_idle(delay, window, cx)));
+            let (_settings, mut settings_cx) = open_settings(&view, cx);
+            open_idle_list(&mut settings_cx);
+            settings_cx
+        };
+        let offers = |selector, cx: &mut VisualTestContext| cx.debug_bounds(selector).is_some();
+
+        let mut settings_cx = open_list(5., cx);
+        assert!(offers("omarchy-choice-option-7", &mut settings_cx));
+        assert!(
+            !offers("omarchy-choice-option-8", &mut settings_cx),
             "an offered delay isn't listed twice"
+        );
+        closing_keys("escape escape", &mut settings_cx);
+
+        let mut settings_cx = open_list(0.1, cx);
+        assert!(offers("omarchy-choice-option-8", &mut settings_cx));
+        // The list opens on the current delay, and Never is the only shorter one.
+        keys(&mut settings_cx, "up enter");
+        assert_eq!(config(&view, cx).idle, None);
+        click("idle-choice", &mut settings_cx);
+        keys(&mut settings_cx, "down enter");
+        assert_eq!(
+            config(&view, cx).idle.map(IdleDelay::get),
+            Some(Duration::from_secs(6))
         );
     }
 
     #[test]
     fn delays_read_naturally() {
         assert_eq!(idle_label(None), "Never");
+        assert_eq!(idle_label(IdleDelay::from_minutes(0.1)), "After 6 seconds");
         assert_eq!(idle_label(IdleDelay::from_minutes(1.)), "After 1 minute");
         assert_eq!(idle_label(IdleDelay::from_minutes(2.)), "After 2 minutes");
         assert_eq!(idle_label(IdleDelay::from_minutes(60.)), "After 1 hour");
@@ -1093,20 +1091,21 @@ mod tests {
     #[gpui_kit::test]
     fn a_pending_question_cannot_act_on_the_new_folder(cx: &mut TestAppContext) {
         let (old, view, cx) = open(cx);
-        // The same file name in both trashes, which a question can't tell apart.
+        // The same file in both trashes, which a question can't tell apart.
         let new = tempfile::tempdir().unwrap();
-        fs::create_dir_all(old.path().join(".trash")).unwrap();
-        fs::create_dir_all(new.path().join(".trash")).unwrap();
-        fs::write(old.path().join(".trash/same.md"), "old").unwrap();
-        fs::write(new.path().join(".trash/same.md"), "new").unwrap();
-        view.update_in(cx, |this, window, cx| {
-            this.ask_to_delete_forever("same.md".into(), window, cx);
-        });
+        for dir in [&old, &new] {
+            fs::create_dir_all(dir.path().join(".trash")).unwrap();
+            fs::write(dir.path().join(".trash/same.md"), "same").unwrap();
+        }
+        keys(cx, "ctrl-shift-t");
+        click("delete-forever", cx);
+        assert!(cx.debug_bounds("confirm").is_some());
 
         view.update_in(cx, |this, window, cx| {
             this.set_notes_dir(Some(NotesDir::new(new.path())), window, cx);
         });
-        cx.update(|_, cx| assert!(!view.read(cx).has_question()));
+        keys(cx, "enter");
+        assert!(cx.debug_bounds("confirm").is_none());
         assert!(new.path().join(".trash/same.md").exists());
         assert!(old.path().join(".trash/same.md").exists());
     }

@@ -45,7 +45,7 @@ Replay the steps on the real code, in a test in `src/app.rs`, one line for each 
 | `Select`, `ShowNotes` | `keys(cx, "ctrl-n")`, `keys(cx, "alt-down")` |
 | `IdleMove` | `wait(cx, IDLE)` |
 | `ShowTrash`, `MoveToTrash` | `keys(cx, "ctrl-shift-t")`, `keys(cx, "ctrl-shift-backspace")` |
-| `Ask`, `Confirm` | `this.ask_to_delete_forever(id, …)`, then `cx.dispatch_action(actions::Confirm { secondary: false })` |
+| `Ask`, `Confirm` | `click("delete-forever", cx)`, `click("confirm", cx)` |
 | `Quit` | `cx.simulate_close()` |
 | `FlushFails` | `fs::remove_dir_all(dir.path())` before the save |
 | `TheyWrite`, `TheyDelete`, and in the trash | `fs::write`, `fs::remove_file` |
@@ -142,7 +142,7 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `show_trash` | ShowTrash, Flushed | `777c73bc1331` |
 | `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `76a31ce6c5c9` |
 | `src/app.rs` | `restore` | Restore | `79882eef2106` |
-| `src/app.rs` | `ask_to_delete_forever` | Ask | `99050747308c` |
+| `src/app.rs` | `ask_to_delete_forever` | Ask | `cda0763f0d51` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
 | `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `26448ecfa9bb` |
 | `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `d99638780c0e` |

@@ -400,7 +400,11 @@ fn unwrapped(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::watch::testing::QUIET;
+    use std::{
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        time::Duration,
+    };
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -503,6 +507,20 @@ mod tests {
     fn a_failed_save_keeps_the_previous_contents_and_cleans_up() {
         let (dir, store) = store();
         let id = store.create("old").unwrap();
+        // This folder takes no new file, though what it holds can be written over in
+        // place. Root isn't stopped.
+        if fs::metadata(dir.path()).unwrap().uid() != 0 {
+            let set_mode = |mode| {
+                fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+            };
+            set_mode(0o500);
+            let saved = store.save(&id, "old", "new");
+            set_mode(0o700);
+            assert!(saved.is_err());
+            assert_eq!(store.read(&id).unwrap(), "old");
+            assert_eq!(files(dir.path()), [id.as_str()]);
+        }
+
         // A directory in the way can be neither read nor replaced.
         fs::create_dir(dir.path().join("blocked.md")).unwrap();
         assert!(store.save("blocked.md", "", "new").is_err());
@@ -513,8 +531,27 @@ mod tests {
 
     #[test]
     fn a_save_in_progress_has_a_name_dropbox_never_syncs() {
-        // Dropbox skips names starting with `.~`, and the list skips those with a dot.
-        assert_eq!(temp_name("note.md"), ".~note.md.tmp");
+        use notify::{RecursiveMode, Watcher};
+        let (dir, store) = store();
+        let id = store.create("old").unwrap();
+        let (sender, events) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(sender).unwrap();
+        watcher
+            .watch(dir.path(), RecursiveMode::NonRecursive)
+            .unwrap();
+        while events.recv_timeout(QUIET).is_ok() {}
+
+        store.save(&id, "old", "new").unwrap();
+        let names: Vec<_> = iter::from_fn(|| events.recv_timeout(Duration::from_secs(1)).ok())
+            .flat_map(|event| event.unwrap().paths)
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+        let never_synced = |name: &String| name.starts_with(".~");
+        assert!(names.iter().any(never_synced), "{names:?}");
+        assert!(
+            names.iter().all(|name| *name == id || never_synced(name)),
+            "{names:?}"
+        );
     }
 
     #[test]
@@ -757,7 +794,7 @@ mod tests {
             ("__init__.py", "__init__.py"),
             ("snake_case_name", "snake_case_name"),
         ] {
-            assert_eq!(title_of(text), title, "for {text:?}");
+            assert_eq!(note(text).title, title, "for {text:?}");
         }
     }
 
@@ -776,7 +813,7 @@ mod tests {
             ("Title\n- [x] done", "done"),
             ("Title\nsee `this`", "see `this`"),
         ] {
-            assert_eq!(preview_of(text), preview, "for {text:?}");
+            assert_eq!(note(text).preview, preview, "for {text:?}");
         }
     }
 
@@ -830,8 +867,8 @@ mod tests {
 
     #[test]
     fn a_long_preview_is_cut_between_characters() {
-        let text = format!("Title\n{}", "é".repeat(PREVIEW_CHARS * 2));
-        assert_eq!(preview_of(&text), "é".repeat(PREVIEW_CHARS));
+        let note = note(&format!("Title\n{}", "é".repeat(PREVIEW_CHARS * 2)));
+        assert_eq!(note.preview, "é".repeat(PREVIEW_CHARS));
     }
 
     #[test]

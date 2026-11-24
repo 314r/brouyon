@@ -406,58 +406,128 @@ pub fn editor_style(theme: &Theme) -> InputEditorStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{AppContext, TestAppContext, VisualTestContext};
 
-    /// Text covered by each mark, in order, for readable expectations.
-    fn marked(text: &str, mark: u8) -> Vec<&str> {
-        parse(text)
+    /// What gives the editor its styles, for a note that holds `text`.
+    fn highlighter(text: &str, cx: &mut VisualTestContext) -> Box<dyn InputHighlighter> {
+        let mut highlighter = highlighter_factory()(LANGUAGE).unwrap();
+        cx.update(|window, cx| {
+            let editor = cx.new(|cx| EditorState::new(window, cx));
+            editor.update(cx, |_, cx| {
+                highlighter.update(None, &Rope::from(text), false, window, cx);
+            });
+        });
+        highlighter
+    }
+
+    fn styles(
+        highlighter: &dyn InputHighlighter,
+        range: &Range<usize>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let editor = editor_style(&Theme::tokyo_night());
+        highlighter.styles(range, &*editor.highlight_styles)
+    }
+
+    /// The pieces of `text`, each with the style it is shown in.
+    fn styled<'a>(text: &'a str, cx: &mut VisualTestContext) -> Vec<(&'a str, HighlightStyle)> {
+        styles(&*highlighter(text, cx), &(0..text.len()))
             .into_iter()
-            .filter(|(_, marks)| marks & mark != 0)
-            .map(|(range, _)| &text[range])
+            .map(|(range, style)| (&text[range], style))
             .collect()
     }
 
-    struct EveryMarkStyled;
-    impl HighlightStyleResolver for EveryMarkStyled {
-        fn style(&self, _: &str) -> Option<HighlightStyle> {
-            Some(HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            })
+    fn colored(color: Hsla) -> HighlightStyle {
+        HighlightStyle {
+            color: Some(color),
+            ..Default::default()
         }
     }
 
-    #[test]
-    fn recognizes_the_common_markdown_elements() {
-        assert_eq!(marked("# Title\n", HEADING), ["# Title\n"]);
-        assert_eq!(marked("a **b** c", STRONG), ["**b**"]);
-        assert_eq!(marked("a *b* c", EMPHASIS), ["*b*"]);
-        assert_eq!(marked("a ~~b~~ c", STRIKE), ["~~b~~"]);
-        assert_eq!(marked("a `b` c", CODE), ["`b`"]);
-        assert_eq!(marked("```\ncode\n```\n", CODE), ["```\ncode\n```"]);
-        assert_eq!(marked("[a](http://b)", LINK), ["[a](http://b)"]);
-        assert_eq!(marked("> quote\n", QUOTE), ["> quote\n"]);
-        assert_eq!(marked("---\n", MARKER), ["---\n"]);
+    #[gpui_kit::test]
+    fn recognizes_the_common_markdown_elements(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let t = Theme::tokyo_night();
+        let plain = HighlightStyle::default();
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..plain
+        };
+        let italic = HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..plain
+        };
+        let heading = bold.highlight(colored(t.accent));
+        let struck = HighlightStyle {
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(t.secondary),
+            }),
+            ..colored(t.secondary)
+        };
+        let link = HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(t.accent),
+                wavy: false,
+            }),
+            ..colored(t.accent)
+        };
+        for (piece, style) in [
+            ("# Title\n", heading),
+            ("```\ncode\n```", colored(t.success)),
+            ("[a](http://b)", link),
+            ("> quote\n", colored(t.secondary)),
+            ("---\n", colored(t.secondary)),
+            ("just some words\n", plain),
+        ] {
+            assert_eq!(styled(piece, cx), [(piece, style)]);
+        }
+        for (piece, style) in [
+            ("**b**", bold),
+            ("*b*", italic),
+            ("~~b~~", struck),
+            ("`b`", colored(t.success)),
+        ] {
+            let text = format!("a {piece} c");
+            let expected = [("a ", plain), (piece, style), (" c", plain)];
+            assert_eq!(styled(&text, cx), expected);
+        }
+        assert!(styled("", cx).is_empty());
     }
 
-    #[test]
-    fn only_the_bullet_of_a_list_item_is_a_marker() {
-        assert_eq!(marked("- one\n- two\n", MARKER), ["-", "-"]);
-        assert_eq!(marked("1. one\n", MARKER), ["1."]);
-        assert_eq!(marked("- [x] done\n", MARKER), ["-", "[x]"]);
+    #[gpui_kit::test]
+    fn only_the_bullet_of_a_list_item_is_a_marker(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let marker = colored(Theme::tokyo_night().secondary);
+        for (text, markers) in [
+            ("- one\n- two\n", vec!["-", "-"]),
+            ("1. one\n", vec!["1."]),
+            ("- [x] done\n", vec!["-", "[x]"]),
+        ] {
+            let mut pieces = styled(text, cx);
+            pieces.retain(|(_, style)| *style != HighlightStyle::default());
+            let expected: Vec<_> = markers.into_iter().map(|piece| (piece, marker)).collect();
+            assert_eq!(pieces, expected);
+        }
     }
 
-    #[test]
-    fn nested_marks_combine() {
-        let runs = parse("***both***");
-        assert!(
-            runs.iter()
-                .any(|(_, m)| m & STRONG != 0 && m & EMPHASIS != 0)
-        );
-        let runs = parse("# a **b**\n");
-        assert!(
-            runs.iter()
-                .any(|(_, m)| m & STRONG != 0 && m & HEADING != 0)
-        );
+    #[gpui_kit::test]
+    fn nested_marks_combine(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let bold = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        let heading = bold.highlight(colored(Theme::tokyo_night().accent));
+        let italic = |style| HighlightStyle {
+            font_style: Some(FontStyle::Italic),
+            ..style
+        };
+        let mut shown = |text, style| styled(text, cx).iter().any(|piece| piece.1 == style);
+        assert!(shown("***both***", italic(bold)));
+        assert!(shown("# a *b*\n", italic(heading)));
+        let in_heading = styled("# a **b**\n", cx);
+        assert!(in_heading.iter().all(|piece| piece.1 == heading));
     }
 
     #[test]
@@ -623,16 +693,11 @@ mod tests {
         assert_eq!(word_count("end of one\n**start** of the next"), 7);
     }
 
-    #[test]
-    fn plain_text_and_empty_notes_have_no_runs() {
-        assert!(parse("").is_empty());
-        assert!(parse("just some words\n").is_empty());
-    }
-
     /// Exercises the contract the editor relies on: runs are ordered, do not
     /// overlap, fully cover the requested range and land on char boundaries.
-    #[test]
-    fn styles_fully_cover_any_range_in_order() {
+    #[gpui_kit::test]
+    fn styles_fully_cover_any_range_in_order(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
         for text in [
             "",
             "plain",
@@ -642,7 +707,7 @@ mod tests {
             "***\n**unterminated *nest\n`open\n",
             "日本語 **太字** テキスト\n\n# 見出し\n",
         ] {
-            let highlighter = MarkdownHighlighter { runs: parse(text) };
+            let highlighter = highlighter(text, cx);
             let boundaries: Vec<_> = text
                 .char_indices()
                 .map(|(i, _)| i)
@@ -651,7 +716,7 @@ mod tests {
             for &start in &boundaries {
                 for &end in boundaries.iter().filter(|&&end| end >= start) {
                     let range = start..end;
-                    let styles = highlighter.styles(&range, &EveryMarkStyled);
+                    let styles = styles(&*highlighter, &range);
                     let mut position = start;
                     for (run, _) in &styles {
                         assert_eq!(run.start, position, "gap or overlap in {text:?} {range:?}");
@@ -664,18 +729,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn unstyled_text_between_runs_gets_the_default_style() {
-        let highlighter = MarkdownHighlighter {
-            runs: parse("a **b** c"),
-        };
-        let styles = highlighter.styles(&(0..9), &EveryMarkStyled);
-        assert_eq!(styles.len(), 3);
-        assert_eq!(styles[0], (0..2, HighlightStyle::default()));
-        assert_eq!(styles[1].0, 2..7);
-        assert_ne!(styles[1].1, HighlightStyle::default());
-        assert_eq!(styles[2], (7..9, HighlightStyle::default()));
     }
 }

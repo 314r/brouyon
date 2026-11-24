@@ -97,8 +97,12 @@ impl Config {
         let home = home_dir();
         let path = xdg_dir("XDG_CONFIG_HOME", ".config", &home).join("brouyon/config.toml");
         let data_home = xdg_dir("XDG_DATA_HOME", ".local/share", &home);
+        Self::load_from(path, &data_home, &home)
+    }
+
+    fn load_from(path: PathBuf, data_home: &Path, home: &Path) -> (Self, Option<String>) {
         let (file, problem) = read_file_config(&path);
-        (Self::resolve(file, path, &data_home, &home), problem)
+        (Self::resolve(file, path, data_home, home), problem)
     }
 
     fn resolve(file: FileConfig, path: PathBuf, data_home: &Path, home: &Path) -> Self {
@@ -293,6 +297,18 @@ mod tests {
         )
     }
 
+    fn load(path: &Path) -> (Config, Option<String>) {
+        Config::load_from(path.into(), Path::new("/data"), Path::new("/home/me"))
+    }
+
+    /// The defaults, which have a test of their own, with `path` for their file.
+    fn defaults(path: &Path) -> Config {
+        Config {
+            path: path.into(),
+            ..resolve("")
+        }
+    }
+
     /// Settings saved to a real file in a temporary folder.
     fn in_temp_dir(contents: Option<&str>) -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
@@ -365,17 +381,20 @@ mod tests {
 
     #[test]
     fn an_idle_delay_too_long_or_too_short_to_count_is_brought_within_reach() {
-        assert_eq!(resolve("idle_minutes = 1e300").idle, Some(IdleDelay::MAX));
-        assert_eq!(resolve("idle_minutes = 1e17").idle, Some(IdleDelay::MAX));
-        assert_eq!(resolve("idle_minutes = 1e-9").idle, Some(IdleDelay::MIN));
-        assert_eq!(
-            resolve("idle_minutes = inf").idle.map(IdleDelay::get),
-            Some(Duration::from_secs(300))
-        );
-        assert_eq!(
-            resolve("idle_minutes = nan").idle.map(IdleDelay::get),
-            Some(Duration::from_secs(300))
-        );
+        for (minutes, seconds) in [
+            ("1e300", 31_536_000),
+            ("1e17", 31_536_000),
+            ("1e-9", 1),
+            ("inf", 300),
+            ("nan", 300),
+        ] {
+            let config = resolve(&format!("idle_minutes = {minutes}"));
+            assert_eq!(
+                config.idle.map(IdleDelay::get),
+                Some(Duration::from_secs(seconds)),
+                "{minutes}"
+            );
+        }
     }
 
     #[test]
@@ -396,10 +415,19 @@ mod tests {
 
     #[test]
     fn invalid_config_is_rejected_rather_than_half_applied() {
-        assert!(toml::from_str::<FileConfig>("idle_minutes = \"soon\"").is_err());
-        assert!(toml::from_str::<FileConfig>("unknown_key = 1").is_err());
-        assert!(toml::from_str::<FileConfig>("theme = \"blue\"").is_err());
-        assert!(toml::from_str::<FileConfig>("copy_as = \"html\"").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for invalid in [
+            "idle_minutes = \"soon\"",
+            "unknown_key = 1",
+            "theme = \"blue\"",
+            "copy_as = \"html\"",
+        ] {
+            fs::write(&path, format!("text_percent = 150\n{invalid}\n")).unwrap();
+            let (config, problem) = load(&path);
+            assert_eq!(config, defaults(&path), "{invalid}");
+            assert!(problem.is_some(), "{invalid}");
+        }
     }
 
     #[test]
@@ -421,8 +449,8 @@ mod tests {
     #[test]
     fn a_missing_settings_file_is_not_a_problem() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, problem) = read_file_config(&dir.path().join("config.toml"));
-        assert_eq!(problem, None);
+        let path = dir.path().join("config.toml");
+        assert_eq!(load(&path), (defaults(&path), None));
     }
 
     #[test]
@@ -431,8 +459,8 @@ mod tests {
         let path = dir.path().join("config.toml");
         fs::write(&path, "idle_minutes = 7\nunknown_key = 1\n").unwrap();
 
-        let (file, problem) = read_file_config(&path);
-        assert_eq!(file.idle_minutes, None, "not half applied");
+        let (config, problem) = load(&path);
+        assert_eq!(config, defaults(&path), "not half applied");
         let problem = problem.unwrap();
         assert!(problem.contains(path.to_str().unwrap()), "{problem}");
         assert!(problem.contains("unknown_key"), "{problem}");
@@ -443,7 +471,8 @@ mod tests {
     fn a_settings_file_that_cannot_be_opened_is_a_problem_too() {
         let dir = tempfile::tempdir().unwrap();
         // A folder where the file should be fails with something other than "not found".
-        let (_, problem) = read_file_config(dir.path());
+        let (config, problem) = load(dir.path());
+        assert_eq!(config, defaults(dir.path()));
         assert!(problem.unwrap().contains("default settings"));
     }
 
