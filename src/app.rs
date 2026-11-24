@@ -2034,6 +2034,7 @@ impl Brouyon {
 pub(crate) mod tests {
     use super::*;
     use crate::desktop::Transparency;
+    use crate::store::testing::{at_gap, every_gap_was_reached};
     use chrono::TimeZone;
     use gpui_kit::{
         EntityInputHandler, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
@@ -4085,6 +4086,52 @@ pub(crate) mod tests {
         type_and_save(cx, " still");
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine still");
         assert_eq!(note_texts(dir.path()), ["mine still"]);
+    }
+
+    #[gpui_kit::test]
+    fn a_change_that_lands_in_the_middle_of_a_save_is_kept_beside_the_typed_text(
+        cx: &mut TestAppContext,
+    ) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        cx.simulate_input(" and more");
+        let theirs = path.clone();
+        at_gap(1, move || fs::write(theirs, "theirs").unwrap());
+
+        wait(cx, SAVE_DELAY);
+        assert!(every_gap_was_reached());
+        assert_eq!(note_texts(dir.path()), ["mine and more", "theirs"]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
+        assert_eq!(editor_text(&view, cx), "mine and more");
+        assert!(notice(&view, cx).unwrap().contains("new note"));
+    }
+
+    #[gpui_kit::test]
+    fn a_change_that_lands_in_the_middle_of_a_removal_keeps_the_file(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        keys(cx, "ctrl-a backspace");
+        at_gap(1, move || fs::write(path, "theirs").unwrap());
+
+        wait(cx, SAVE_DELAY);
+        assert!(every_gap_was_reached());
+        assert_eq!(note_texts(dir.path()), ["theirs"]);
+        assert_eq!(titles(&view, cx), ["theirs"]);
+        assert!(notice(&view, cx).unwrap().contains("wasn't removed"));
+    }
+
+    #[gpui_kit::test]
+    fn a_change_that_lands_in_the_middle_of_delete_forever_keeps_the_note(cx: &mut TestAppContext) {
+        let (dir, view, cx, id) = with_one_trashed_note(cx);
+        let path = dir.path().join(".trash").join(&id);
+        click("delete-forever", cx);
+        at_gap(1, move || fs::write(path, "rewritten elsewhere").unwrap());
+
+        click("confirm", cx);
+        assert!(every_gap_was_reached());
+        assert_eq!(trashed_texts(dir.path()), ["rewritten elsewhere"]);
+        assert_eq!(editor_text(&view, cx), "rewritten elsewhere");
+        assert!(notice(&view, cx).unwrap().contains("wasn't deleted"));
     }
 
     #[gpui_kit::test]
