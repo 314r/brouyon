@@ -51,8 +51,7 @@ RULES = {
 }
 ALSO = ["TypeOK", "LoadedIsShown", "TrashIsReadOnly", "RefusedIsPending"]
 
-TODAY = {"GapIsQuiet": False, "TrashIsQuiet": False}
-QUIET = {"GapIsQuiet": True, "TrashIsQuiet": True}
+QUIET = {"GapIsQuiet": True}
 
 
 def case(breaks=(), lift=None, broken=None, past=None, names=2, texts=2):
@@ -65,13 +64,11 @@ def case(breaks=(), lift=None, broken=None, past=None, names=2, texts=2):
 
 
 CASES = {
-    # Everything but the findings.
+    # Everything but the finding.
     "promise": case(names=3, texts=3),
-    # The findings. Each is the code as it stands, with the other one set aside.
+    # The finding: the code as it stands.
     "finding-gap": case(
-        ["SaveKeepsTheirs", "RemoveKeepsTheirs", "CreateKeepsTheirs",
-         "TrashKeepsTheirs", "RestoreKeepsTheirs"], lift="GapIsQuiet"),
-    "finding-purge": case(["PurgeKeepsTheirs"], lift="TrashIsQuiet", texts=3),
+        ["SaveKeepsTheirs", "RemoveKeepsTheirs", "PurgeKeepsTheirs"], lift="GapIsQuiet", texts=3),
     # Mistakes that were in the code. Each has to be caught again.
     "mistake-save-skips-its-check": case(
         ["SaveKeepsTheirs"], broken="save-skips-its-check", past="a1a7ee2"),
@@ -85,6 +82,8 @@ CASES = {
         ["LeavingKeepsMine", "RefreshKeepsMine", "QuittingKeepsMine"],
         broken="composing-goes-unnoticed", past="3a26ceb", texts=3),
     # Mistakes nobody has made yet, for the rules the others don't reach.
+    "mistake-purge-skips-its-check": case(
+        ["PurgeKeepsTheirs"], broken="purge-skips-its-check", texts=3),
     "mistake-create-takes-any-name": case(["CreateKeepsTheirs"], broken="create-takes-any-name"),
     "mistake-trash-takes-any-name": case(["TrashKeepsTheirs"], broken="trash-takes-any-name"),
     "mistake-restore-takes-any-name": case(["RestoreKeepsTheirs"], broken="restore-takes-any-name"),
@@ -231,30 +230,26 @@ def told(action, before, after):
             "It may be deleted." if after["pc"] == '"remove.unlink"' else "It is gone, or changed elsewhere and is kept.")
     if action == "RemoveUnlink":
         return f"Store::remove_unchanged deletes {place(before['selection'])}."
-    if action == "CreatePick":
-        return f"Store::create finds the name {after['picked']} free, and writes the temporary file."
-    if action == "CreateRename":
-        return f"Store::create renames its temporary file to {before['picked']}."
+    if action == "CreateMove":
+        return f"Store::create moves its temporary file to {place(after['selection'])}."
     if action == "FlushFails":
         return "A system call of the save fails. save_failed is true."
     if action == "Flushed":
         return f"flush has returned, and the handler goes on ({does(before)})."
     if action == "Open":
         return f"open reads {target(before)}. The editor now holds {after['text']}."
-    if action == "TrashPick":
-        return f"Store::trash finds the name {after['picked']} free in the trash."
-    if action == "TrashRename":
-        return f"Store::trash renames {place(before['selection'])} to .trash/{before['picked']}."
+    if action == "TrashMove":
+        return f"Store::trash moves {place(before['selection'])} to the trash."
     if action == "Restore":
-        return f"You restore the note. Store::restore finds the name {after['picked']} free."
-    if action == "RestoreRename":
-        return f"Store::restore renames {place(before['selection'])} to {before['picked']}."
+        return f"You restore the note. Store::restore moves {place(before['selection'])} to the notes."
     if action == "Ask":
         return f"You ask to delete {selection} forever. The editor shows {after['text']}."
     if action == "Cancel":
         return "You answer no."
     if action == "Confirm":
-        return f"You answer yes. Store::purge deletes {place(before['selection'])}."
+        return f"You answer yes. Store::purge reads {place(before['selection'])}."
+    if action == "PurgeUnlink":
+        return f"Store::purge deletes {place(before['selection'])}."
     if action == "Sync":
         return f"sync_with_disk looks at the folder. The editor now holds {after['text']}."
     if action in ("TheyWrite", "TheyWriteInTrash"):
@@ -312,7 +307,8 @@ TOUCHES = {
     "src/app.rs": r"self\.store\.|self\.save_state\b|self\.loaded = |self\.selection = |\bKept\b|MayLeave"
                   r"|replace_editor\(|set_value\(|show_in_place\(|\.flush\(|quit_without_windows\(",
     "src/kept.rs": r"Kept|Warned|MayLeave|State::|remove_window\(|cx\.quit\(",
-    "src/store.rs": r"fs::(?:rename|remove_\w+|write)\(|File::create\(|write_if\(|write_atomically\(|free_name\(",
+    "src/store.rs": r"fs::(?:rename|remove_\w+|write)\(|File::create\(|write_(?:if|temp|atomically)\(|\breplace\("
+                    r"|renameat_with|move_new|move_to_free_name|remove_if_holds|\bgone\(",
 }
 
 

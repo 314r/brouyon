@@ -19,6 +19,7 @@ chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 toml_edit = "0.22"
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
 notify = "7"
 async-channel = "2"
 

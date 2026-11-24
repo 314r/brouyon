@@ -17,10 +17,9 @@ CONSTANTS
     Texts,          \* what a note can hold, besides nothing
     None,           \* no file, or no note
     Empty,          \* no text
-    \* Each of these sets one of the findings aside, to look past it. README.md
-    \* has them. With both FALSE this is the code as it stands.
+    \* Sets the finding aside, to look past it. README.md has it. With FALSE this
+    \* is the code as it stands.
     GapIsQuiet,     \* nobody writes between a check and the act it allows
-    TrashIsQuiet,   \* nobody rewrites the trashed note that is on screen
     Broken          \* which deliberate mistakes are in the code, for testing
 
 Contents == Texts \cup {Empty}
@@ -39,7 +38,7 @@ VARIABLES
     saveFailed,     \* SaveState is Refused
     asking,         \* `confirm` holds a DeleteForever
     \* Where the handler that is running has got to.
-    pc, handler, picked,
+    pc, handler,
     \* What the promise is about. Brouyon's code can't see these.
     shown,          \* what the open note's file held when the user last saw it
     overwritten,    \* the acts that destroyed text the user hadn't seen
@@ -47,7 +46,7 @@ VARIABLES
 
 disk   == <<notes, trash>>
 app    == <<selection, text, marked, dirty, loaded, saveFailed, asking>>
-run    == <<pc, handler, picked>>
+run    == <<pc, handler>>
 ghosts == <<shown, overwritten, dropped>>
 vars   == <<disk, app, run, ghosts>>
 
@@ -65,7 +64,7 @@ Init ==
     /\ trash = [n \in Names |-> None]
     /\ selection = Blank /\ text = Empty /\ marked = FALSE
     /\ dirty = FALSE /\ loaded = None /\ saveFailed = FALSE /\ asking = FALSE
-    /\ pc = "ready" /\ handler = NoHandler /\ picked = None
+    /\ pc = "ready" /\ handler = NoHandler
     /\ shown = None /\ overwritten = {} /\ dropped = {}
 
 -----------------------------------------------------------------------------
@@ -85,7 +84,7 @@ Destroys(act, held, fine) ==
     overwritten' = IF held \in fine \cup {None, Empty} THEN overwritten
                    ELSE overwritten \cup {act}
 
-Done == pc' = "ready" /\ handler' = NoHandler /\ picked' = None
+Done == pc' = "ready" /\ handler' = NoHandler
 
 \* `free_name` takes the name it was given unless a file has it.
 FreeNames(folder, wanted) ==
@@ -126,14 +125,14 @@ Unmark ==
 
 Flush(h) ==
     /\ handler' = h
-    /\ UNCHANGED <<disk, selection, text, marked, loaded, asking, picked, ghosts>>
+    /\ UNCHANGED <<disk, selection, text, marked, loaded, asking, ghosts>>
     /\ IF ~dirty \/ (h.does = "quit" /\ "quit-without-saving" \in Broken)
        THEN pc' = "flushed" /\ UNCHANGED <<dirty, saveFailed>>
        ELSE IF selection.kind = "note" /\ loaded # text
        THEN /\ pc' = IF text = Empty THEN "remove.read" ELSE "save.read"
             /\ UNCHANGED <<dirty, saveFailed>>
        ELSE IF selection = Blank /\ text # Empty
-       THEN pc' = "create.pick" /\ UNCHANGED <<dirty, saveFailed>>
+       THEN pc' = "create.move" /\ UNCHANGED <<dirty, saveFailed>>
        ELSE pc' = "flushed" /\ dirty' = FALSE /\ saveFailed' = FALSE
 
 \* The timer of on_editor_notify, 400 ms after the last change.
@@ -191,63 +190,58 @@ SaveRead ==
            skips == "save-skips-its-check" \in Broken
        IN  IF held = text
            THEN /\ pc' = "flushed" /\ Saved
-                /\ UNCHANGED <<disk, selection, text, marked, asking, handler, picked,
+                /\ UNCHANGED <<disk, selection, text, marked, asking, handler,
                                overwritten, dropped>>
            ELSE IF held \in {loaded, None} \/ skips
-           THEN pc' = "save.rename" /\ UNCHANGED <<disk, app, handler, picked, ghosts>>
+           THEN pc' = "save.rename" /\ UNCHANGED <<disk, app, handler, ghosts>>
            ELSE IF "conflict-takes-theirs" \in Broken
            THEN /\ pc' = "flushed" /\ dirty' = FALSE /\ saveFailed' = FALSE
                 /\ text' = held /\ loaded' = held /\ shown' = held
                 /\ LetsGo("conflict")
-                /\ UNCHANGED <<disk, selection, marked, asking, handler, picked, overwritten>>
+                /\ UNCHANGED <<disk, selection, marked, asking, handler, overwritten>>
            \* Saved::Changed: the text goes into a new note beside the file.
-           ELSE pc' = "create.pick" /\ UNCHANGED <<disk, app, handler, picked, ghosts>>
+           ELSE pc' = "create.move" /\ UNCHANGED <<disk, app, handler, ghosts>>
 
 SaveRename ==
     /\ pc = "save.rename"
     /\ notes' = [notes EXCEPT ![selection.id] = text]
     /\ Destroys("save", notes[selection.id], {shown, text})
     /\ pc' = "flushed" /\ Saved
-    /\ UNCHANGED <<trash, selection, text, marked, asking, handler, picked, dropped>>
+    /\ UNCHANGED <<trash, selection, text, marked, asking, handler, dropped>>
 
 \* Store::remove_unchanged, for a note that was emptied.
 RemoveRead ==
     /\ pc = "remove.read"
     /\ LET held == notes[selection.id] IN
        IF held = loaded \/ (held # None /\ "remove-skips-its-check" \in Broken)
-       THEN pc' = "remove.unlink" /\ UNCHANGED <<disk, app, handler, picked, ghosts>>
+       THEN pc' = "remove.unlink" /\ UNCHANGED <<disk, app, handler, ghosts>>
        ELSE \* Gone already, or KeptTheirs.
             /\ pc' = "flushed" /\ SavedNothing
-            /\ UNCHANGED <<disk, text, marked, asking, handler, picked, overwritten, dropped>>
+            /\ UNCHANGED <<disk, text, marked, asking, handler, overwritten, dropped>>
 
 RemoveUnlink ==
     /\ pc = "remove.unlink"
     /\ notes' = [notes EXCEPT ![selection.id] = None]
     /\ Destroys("remove", notes[selection.id], {shown})
     /\ pc' = "flushed" /\ SavedNothing
-    /\ UNCHANGED <<trash, text, marked, asking, handler, picked, dropped>>
+    /\ UNCHANGED <<trash, text, marked, asking, handler, dropped>>
 
-\* Store::create finds a free name. The fsync comes next, then the rename.
-CreatePick ==
-    /\ pc = "create.pick"
+\* Store::create, after the fsync: move_to_free_name.
+CreateMove ==
+    /\ pc = "create.move"
     /\ \E n \in IF "create-takes-any-name" \in Broken THEN Names
-                ELSE FreeNames(notes, None) : picked' = n
-    /\ pc' = "create.rename"
-    /\ UNCHANGED <<disk, app, handler, ghosts>>
-
-CreateRename ==
-    /\ pc = "create.rename"
-    /\ notes' = [notes EXCEPT ![picked] = text]
-    /\ Destroys("create", notes[picked], {text})
-    /\ selection' = Note(picked) /\ picked' = None
+                ELSE FreeNames(notes, None) :
+          /\ notes' = [notes EXCEPT ![n] = text]
+          /\ Destroys("create", notes[n], {text})
+          /\ selection' = Note(n)
     /\ pc' = "flushed" /\ Saved
     /\ UNCHANGED <<trash, text, marked, asking, handler, dropped>>
 
 \* A system call fails, such as on a full disk. The text stays in the editor.
 FlushFails ==
-    /\ pc \in {"save.read", "save.rename", "create.pick", "create.rename",
+    /\ pc \in {"save.read", "save.rename", "create.move",
                "remove.read", "remove.unlink"}
-    /\ saveFailed' = TRUE /\ picked' = None
+    /\ saveFailed' = TRUE
     /\ dirty' = ("failed-save-counts-as-saved" \notin Broken)
     /\ UNCHANGED <<disk, selection, text, marked, loaded, asking, shown, overwritten>>
     /\ IF /\ handler.does = "quit"
@@ -288,7 +282,7 @@ ShowNextTrashed ==
     \E next \in AfterTrashed :
         /\ handler' = [Does("open") EXCEPT !.target = next]
         /\ pc' = "open"
-        /\ picked' = None
+       
 
 RefreshOpenNote ==
     IF selection.kind = "note" /\ (~dirty \/ "refresh-ignores-dirty" \in Broken)
@@ -307,25 +301,25 @@ Flushed ==
          [] handler.does = "open" ->
               IF handler.target = selection /\ selection # Blank
               THEN Done /\ UNCHANGED <<disk, app, ghosts>>
-              ELSE pc' = "open" /\ UNCHANGED <<disk, app, handler, picked, ghosts>>
+              ELSE pc' = "open" /\ UNCHANGED <<disk, app, handler, ghosts>>
          [] handler.does = "showTrash" ->
               IF \E n \in Names : trash[n] # None
               THEN \E n \in Names :
                       /\ trash[n] # None
                       /\ pc' = "open"
                       /\ handler' = [Does("open") EXCEPT !.target = Trashed(n)]
-                      /\ UNCHANGED <<disk, app, picked, ghosts>>
+                      /\ UNCHANGED <<disk, app, ghosts>>
               ELSE Done /\ UNCHANGED <<disk, app, ghosts>>
          \* The save kept both, and neither goes without a look.
          [] handler.does = "trash" ->
               IF \/ selection.kind # "note"
                  \/ handler.from.kind = "note" /\ handler.from # selection
               THEN Done /\ UNCHANGED <<disk, app, ghosts>>
-              ELSE pc' = "trash.pick" /\ UNCHANGED <<disk, app, handler, picked, ghosts>>
+              ELSE pc' = "trash.move" /\ UNCHANGED <<disk, app, handler, ghosts>>
          [] handler.does = "quit" ->
               /\ pc' = "closed" /\ handler' = NoHandler
               /\ LetsGo("quit")
-              /\ UNCHANGED <<disk, app, picked, shown, overwritten>>
+              /\ UNCHANGED <<disk, app, shown, overwritten>>
 
 \* `open` reads the file and shows it in a new editor. A file that can't be
 \* read leaves the note that was open where it is.
@@ -347,41 +341,32 @@ Open ==
 -----------------------------------------------------------------------------
 (* The trash.                                                              *)
 
-TrashPick ==
-    /\ pc = "trash.pick"
-    /\ \E n \in IF "trash-takes-any-name" \in Broken THEN Names
-                ELSE FreeNames(trash, selection.id) : picked' = n
-    /\ pc' = "trash.rename"
-    /\ UNCHANGED <<disk, app, handler, ghosts>>
-
-\* Store::trash moves the file, whatever it holds by then.
-TrashRename ==
-    /\ pc = "trash.rename"
+\* Store::trash, which moves the file, whatever it holds by then.
+TrashMove ==
+    /\ pc = "trash.move"
     /\ IF notes[selection.id] = None
        THEN Done /\ UNCHANGED <<disk, app, ghosts>>
-       ELSE /\ trash' = [trash EXCEPT ![picked] = notes[selection.id]]
+       ELSE \E n \in IF "trash-takes-any-name" \in Broken THEN Names
+                     ELSE FreeNames(trash, selection.id) :
+            /\ trash' = [trash EXCEPT ![n] = notes[selection.id]]
             /\ notes' = [notes EXCEPT ![selection.id] = None]
-            /\ Destroys("trash", trash[picked], {notes[selection.id]})
-            /\ pc' = "open" /\ picked' = None
+            /\ Destroys("trash", trash[n], {notes[selection.id]})
+            /\ pc' = "open"
             /\ handler' = [Does("open") EXCEPT !.target = Blank]
             /\ UNCHANGED <<app, shown, dropped>>
 
+\* Store::restore.
 Restore ==
     /\ CanAct /\ selection.kind = "trashed"
-    /\ \E n \in IF "restore-takes-any-name" \in Broken THEN Names
-                ELSE FreeNames(notes, selection.id) : picked' = n
-    /\ pc' = "restore.rename"
-    /\ UNCHANGED <<disk, app, handler, ghosts>>
-
-RestoreRename ==
-    /\ pc = "restore.rename"
     /\ IF trash[selection.id] = None
-       THEN Done /\ UNCHANGED <<disk, app, ghosts>>
-       ELSE /\ notes' = [notes EXCEPT ![picked] = trash[selection.id]]
+       THEN UNCHANGED vars
+       ELSE \E n \in IF "restore-takes-any-name" \in Broken THEN Names
+                     ELSE FreeNames(notes, selection.id) :
+            /\ notes' = [notes EXCEPT ![n] = trash[selection.id]]
             /\ trash' = [trash EXCEPT ![selection.id] = None]
-            /\ Destroys("restore", notes[picked], {trash[selection.id]})
-            /\ pc' = "open" /\ picked' = None
-            /\ handler' = [Does("open") EXCEPT !.target = Note(picked)]
+            /\ Destroys("restore", notes[n], {trash[selection.id]})
+            /\ pc' = "open"
+            /\ handler' = [Does("open") EXCEPT !.target = Note(n)]
             /\ UNCHANGED <<app, shown, dropped>>
 
 \* Delete forever asks first. Emptying the trash is left out: whoever confirms
@@ -396,10 +381,21 @@ Cancel ==
     /\ asking' = FALSE
     /\ UNCHANGED <<disk, selection, text, marked, dirty, loaded, saveFailed, run, ghosts>>
 
-\* `answer`, then Store::purge, which is one system call.
+\* `answer`, up to the read of Store::purge.
 Confirm ==
     /\ Ready /\ asking
     /\ asking' = FALSE
+    /\ UNCHANGED <<disk, selection, text, marked, dirty, loaded, saveFailed, ghosts>>
+    /\ IF trash[selection.id] = None
+       THEN ShowNextTrashed
+       ELSE IF trash[selection.id] = shown \/ "purge-skips-its-check" \in Broken
+       THEN pc' = "purge.unlink" /\ UNCHANGED handler
+       \* It wasn't deleted, and is shown as it is now.
+       ELSE /\ pc' = "open"
+            /\ handler' = [Does("open") EXCEPT !.target = selection]
+
+PurgeUnlink ==
+    /\ pc = "purge.unlink"
     /\ trash' = [trash EXCEPT ![selection.id] = None]
     /\ Destroys("purge", trash[selection.id], {shown})
     /\ LET left == {n \in Names : trash'[n] # None} IN
@@ -407,8 +403,7 @@ Confirm ==
                    ELSE {Blank} \cup {Note(n) : n \in {m \in Names : notes[m] # None}} :
           /\ handler' = [Does("open") EXCEPT !.target = next]
           /\ pc' = "open"
-    /\ UNCHANGED <<notes, selection, text, marked, dirty, loaded, saveFailed, picked,
-                   shown, dropped>>
+    /\ UNCHANGED <<notes, app, shown, dropped>>
 
 -----------------------------------------------------------------------------
 (* sync_with_disk, for the folder's watcher and when the window gets the   *)
@@ -420,8 +415,7 @@ Sync == Ready /\ RefreshOpenNote
 (* The other program: Dropbox, an editor, another computer by way of it.   *)
 (* It replaces whole files at once, as a sync client does.                 *)
 
-Gap == pc \in {"save.rename", "remove.unlink", "create.rename",
-               "trash.rename", "restore.rename"}
+Gap == pc \in {"save.rename", "remove.unlink", "purge.unlink"}
 TheyMayAct == pc # "closed" /\ (GapIsQuiet => ~Gap)
 
 TheyWrite(n, t) ==
@@ -436,7 +430,6 @@ TheyDelete(n) ==
 
 TheyWriteInTrash(n, t) ==
     /\ TheyMayAct /\ trash[n] # t
-    /\ TrashIsQuiet => selection # Trashed(n)
     /\ trash' = [trash EXCEPT ![n] = t]
     /\ UNCHANGED <<notes, app, run, ghosts>>
 
@@ -464,18 +457,16 @@ Next ==
     \/ SaveRename
     \/ RemoveRead
     \/ RemoveUnlink
-    \/ CreatePick
-    \/ CreateRename
+    \/ CreateMove
     \/ FlushFails
     \/ Flushed
     \/ Open
-    \/ TrashPick
-    \/ TrashRename
+    \/ TrashMove
     \/ Restore
-    \/ RestoreRename
     \/ Ask
     \/ Cancel
     \/ Confirm
+    \/ PurgeUnlink
     \/ Sync
     \/ \E n \in Names, t \in Contents : TheyWrite(n, t)
     \/ \E n \in Names : TheyDelete(n)
@@ -516,7 +507,7 @@ TypeOK ==
     /\ selection \in Selections
     /\ text \in Contents /\ marked \in BOOLEAN /\ dirty \in BOOLEAN
     /\ loaded \in Contents \cup {None} /\ saveFailed \in BOOLEAN
-    /\ asking \in BOOLEAN /\ picked \in Names \cup {None}
+    /\ asking \in BOOLEAN
     /\ shown \in Contents \cup {None}
 
 \* A trashed note holds no text of the user's, so nothing is pending there.
