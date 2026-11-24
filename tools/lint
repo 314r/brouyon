@@ -88,7 +88,19 @@ def brouyon_is_not_compared_with_drafts(files):
                    "Brouyon does instead: it opens on a blank note, ready to type")
 
 
-RULES = [credits_match_the_code, brouyon_is_not_compared_with_drafts]
+def text_is_read_and_not_announced(files):
+    """Before 3a26ceb, what an input method composed was neither saved nor counted, nor found."""
+    for name, text in files.items():
+        if not name.startswith("src/"):
+            continue
+        for number, line in lines_with(text, r"InputEvent::Change\b"):
+            if not line.lstrip().startswith("//"):
+                yield (f"{name}:{number}: waits for InputEvent::Change, which composed text never emits. "
+                       "Read the field's text when it is needed, as Brouyon::terms does, or compare it on "
+                       "every notify, as on_editor_notify does")
+
+
+RULES = [credits_match_the_code, brouyon_is_not_compared_with_drafts, text_is_read_and_not_announced]
 
 
 def main():

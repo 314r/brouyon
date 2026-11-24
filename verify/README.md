@@ -120,9 +120,9 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `on_editor_event` | Type | `be9c651e2b04` |
 | `src/app.rs` | `edit_list` | Type | `d0a27a483246` |
 | `src/app.rs` | `flush` | Flush, Flushed, FlushFails | `0abe040400da` |
-| `src/app.rs` | `record_save` | Saved, SavedNothing, CreateMove | `0d5ef02c6b2e` |
+| `src/app.rs` | `record_save` | Saved, SavedNothing, CreateMove | `dc99e76dcf49` |
 | `src/app.rs` | `select` | Select, Flushed | `17119680eb90` |
-| `src/app.rs` | `open` | Open | `bbedcfb5c190` |
+| `src/app.rs` | `open` | Open | `5955c840616a` |
 | `src/app.rs` | `replace_editor` | Open | `a27183e2caf5` |
 | `src/app.rs` | `on_idle` | IdleMove | `e6abeea85f3d` |
 | `src/app.rs` | `on_activation` | LoseFocus, Sync | `d337ffe4d03f` |
@@ -136,18 +136,18 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `quit` | Quit | `9bf55810ea6d` |
 | `src/app.rs` | `close` | Quit | `d5edd27afc85` |
 | `src/app.rs` | `on_close` | Quit | `21aa9964281f` |
-| `src/app.rs` | `step` | Select | `999d32eff226` |
+| `src/app.rs` | `step` | Select | `c039d514a3a6` |
 | `src/app.rs` | `move_to_trash` | MoveToTrash, Flushed, TrashMove | `f08dcc893178` |
 | `src/app.rs` | `show_notes` | ShowNotes | `dd56528f935d` |
 | `src/app.rs` | `show_trash` | ShowTrash, Flushed | `777c73bc1331` |
-| `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `a92ad4a6aa96` |
+| `src/app.rs` | `show_next_trashed` | ShowNextTrashed | `76a31ce6c5c9` |
 | `src/app.rs` | `restore` | Restore | `79882eef2106` |
 | `src/app.rs` | `ask_to_delete_forever` | Ask | `99050747308c` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
 | `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `26448ecfa9bb` |
 | `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `4a25b8dc7361` |
-| `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `c7bc29f10fbe` |
+| `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `7ed04ac8791b` |
 | `src/app.rs` | `init` | Left out: it quits only when no window is open | `a8f178eebb98` |
-| `src/app.rs` | `open_filter` | Left out: it sets the text of Find, not of a note | `1f69ec800e54` |
+| `src/app.rs` | `open_filter` | Left out: it sets the text of Find, not of a note | `37f59b12cb50` |
 | `src/app.rs` | `reload_lists` | Left out: it fills the lists, and the model has none | `9735f25930f9` |
 | `Cargo.lock` | `gpui-base 0.9.0` | Type, Compose, Unmark and ShowInPlace: every edit of the text notifies, which `on_editor_notify` relies on | |

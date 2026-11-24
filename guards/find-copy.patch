@@ -1,0 +1,128 @@
+Mistake: Find kept its own copy of what was typed in it, and missed what an input method composed
+Run: tools/lint
+Says: which composed text never emits
+Run: cargo test --locked --quiet finding_follows
+Says: finding_follows_what_an_input_method_composes --- FAILED
+
+diff --git i/src/app.rs w/src/app.rs
+index 954969e..ecb3185 100644
+--- i/src/app.rs
++++ w/src/app.rs
+@@ -339,8 +339,9 @@ pub struct Brouyon {
+     /// The field above the list. What it holds only counts while it is open.
+     filter: Entity<InputState>,
+     filter_open: bool,
+-    /// What the list was last narrowed down to, to start again from its top when it changes.
+-    listed_for: Vec<String>,
++    /// The words a note has to hold to be listed, from [`store::terms`]. None lists
++    /// every note.
++    filter_terms: Vec<String>,
+     save_state: SaveState,
+     /// `None` for a blank note and in the Trash, which have no file to save to.
+     loaded: Option<Loaded>,
+@@ -404,7 +405,7 @@ impl Brouyon {
+             seen: SharedString::default(),
+             filter,
+             filter_open: false,
+-            listed_for: Vec::new(),
++            filter_terms: Vec::new(),
+             save_state: SaveState::default(),
+             loaded: None,
+             problem: None,
+@@ -519,9 +520,14 @@ impl Brouyon {
+         cx: &mut Context<Self>,
+     ) {
+         match event {
++            InputEvent::Change => {
++                self.filter_terms = store::terms(&self.filter.read(cx).value());
++                self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
++                cx.notify();
++            }
+             // Enter opens the first note found. With nothing to find, it goes back
+             // to the note.
+-            InputEvent::PressEnter { .. } if self.terms(cx).is_empty() => {
++            InputEvent::PressEnter { .. } if self.filter_terms.is_empty() => {
+                 self.close_filter();
+                 self.focus_content(window, cx);
+                 cx.notify();
+@@ -538,10 +544,13 @@ impl Brouyon {
+     /// Shows the field that narrows the list down, empty, and puts the cursor in it.
+     /// Already shown, its text is selected, ready to be typed over.
+     fn open_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+-        let nothing_kept = self.terms(cx).is_empty();
+-        self.filter_open = true;
++        if !self.filter_open {
++            self.filter_open = true;
++            self.filter_terms.clear();
++        }
++        let terms_kept = !self.filter_terms.is_empty();
+         self.filter.update(cx, |state, cx| {
+-            if nothing_kept {
++            if !terms_kept {
+                 state.set_value("", window, cx);
+             }
+             state.focus(window, cx);
+@@ -553,14 +562,12 @@ impl Brouyon {
+     /// Lists every note again. Whoever calls this decides where the keyboard goes.
+     fn close_filter(&mut self) {
+         self.filter_open = false;
++        self.filter_terms.clear();
+     }
+ 
+-    /// The words a note has to hold to be listed. None lists every note.
+-    fn terms(&self, cx: &App) -> Vec<String> {
+-        if !self.filter_open {
+-            return Vec::new();
+-        }
+-        store::terms(&self.filter.read(cx).value())
++    #[cfg(test)]
++    fn terms(&self, _: &App) -> Vec<String> {
++        self.filter_terms.clone()
+     }
+ 
+     /// Makes the edit `edit` finds for the text and the cursor, if any. It goes
+@@ -945,16 +952,15 @@ impl Brouyon {
+     /// The rows of the list being shown, top to bottom: the notes or the trash,
+     /// narrowed down to what is being looked for. A blank note has a row of its own
+     /// above the notes, unless something is being looked for.
+-    fn rows(&self, cx: &App) -> Vec<Selection> {
+-        let terms = self.terms(cx);
+-        let found = |note: &&Note| note.matches(&terms);
++    fn rows(&self, _: &App) -> Vec<Selection> {
++        let found = |note: &&Note| note.matches(&self.filter_terms);
+         if self.selection.in_trash() {
+             let trash = self.trash.iter().filter(found);
+             trash
+                 .map(|note| Selection::Trashed(note.id.clone()))
+                 .collect()
+         } else {
+-            let blank = self.selection == Selection::Blank && terms.is_empty();
++            let blank = self.selection == Selection::Blank && self.filter_terms.is_empty();
+             let notes = self.notes.iter().filter(found);
+             blank
+                 .then_some(Selection::Blank)
+@@ -1386,14 +1392,7 @@ impl Brouyon {
+ 
+         let row_height = rems(3.25).to_pixels(window.rem_size());
+         let rows = Rc::new(self.rows(cx));
+-        let terms = self.terms(cx);
+-        let nothing_found = rows.is_empty() && !terms.is_empty();
+-        if terms != self.listed_for {
+-            if !terms.is_empty() {
+-                self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
+-            }
+-            self.listed_for = terms;
+-        }
++        let nothing_found = rows.is_empty() && !self.filter_terms.is_empty();
+         let count = rows.len();
+         let sizes = Rc::new(
+             (0..count)
+@@ -1517,7 +1516,7 @@ impl Brouyon {
+             Some(note) => (
+                 note.title.clone().into(),
+                 format_date(note.modified, chrono::Local::now()).into(),
+-                note.found_line(&self.terms(cx))
++                note.found_line(&self.filter_terms)
+                     .unwrap_or_else(|| note.preview.clone())
+                     .into(),
+             ),
