@@ -369,14 +369,23 @@ mod tests {
     fn toggles_follow_xdg_state_home_but_the_theme_stays_under_home() {
         let home = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let paths = Paths::new(home.path(), state.path());
-        fs::create_dir_all(&paths.current).unwrap();
-        assert!(paths.current.starts_with(home.path()));
+        let toggles = state.path().join("omarchy/toggles/hypr");
+        let config = home.path().join(".config/omarchy");
+        let current = home.path().join(".local/state/omarchy/current");
+        for folder in [&toggles, &config, &current] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        touch(toggles.join("window-glassy.lua"));
+        fs::write(config.join("shell.toml"), "[font]\nbase-size = 24").unwrap();
 
-        fs::create_dir_all(&paths.toggles).unwrap();
-        assert!(paths.toggles.starts_with(state.path()));
-        touch(paths.toggles.join("window-glassy.lua"));
-        assert_eq!(paths.transparency(), Transparency::Glassy);
+        assert_eq!(
+            Desktop::read(&Paths::new(home.path(), state.path())),
+            Desktop {
+                transparency: Transparency::Glassy,
+                text_scale: TextScale::new(2.).unwrap(),
+                font: None,
+            }
+        );
     }
 
     #[test]

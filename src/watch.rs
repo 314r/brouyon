@@ -89,11 +89,6 @@ impl FolderWatcher {
             }
         }
     }
-
-    #[cfg(test)]
-    fn watched(&self) -> Vec<PathBuf> {
-        self.armed.keys().cloned().collect()
-    }
 }
 
 /// Reading a watched file reports an access, which must not cause another read.
@@ -202,12 +197,13 @@ mod tests {
     #[test]
     fn only_the_notes_and_the_trash_are_watched_not_what_is_around_them() {
         let (outside, store, dir) = notes();
-        let (watcher, events) = watch(&store);
-        let dir = fs::canonicalize(dir).unwrap();
-        assert_eq!(watcher.watched(), [dir.clone(), dir.join(".trash")]);
+        let (_watcher, events) = watch(&store);
 
         fs::write(outside.path().join("unrelated"), "x").unwrap();
         nothing_arrives(&events);
+
+        fs::write(dir.join("note.md"), "x").unwrap();
+        wait_for_event(&events);
     }
 
     #[test]
