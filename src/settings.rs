@@ -3,10 +3,8 @@
 
 use crate::{
     app::{Brouyon, Quit},
-    config::{
-        Config, DEFAULT_TEXT_PERCENT, MAX_TEXT_PERCENT, MIN_TEXT_PERCENT, TEXT_PERCENT_STEP,
-        ThemeMode,
-    },
+    checked::{IdleDelay, NotesDir, TextPercent},
+    config::{Config, ThemeMode},
     desktop::{self, Desktop},
     kept,
     look::MAC,
@@ -26,14 +24,13 @@ use gpui_omarchy::{
     ActiveTheme, Button, ButtonVariant, ChoiceItem, ChoiceState, IconName, button, focus_scope,
     icon, scrollbar, select,
 };
-use std::time::Duration;
 
 #[cfg(test)]
 use gpui_kit::Focusable;
 
 const CONTEXT: &str = "BrouyonSettings";
 /// The delays on offer, in minutes. 0 means never.
-const IDLE_MINUTES: [u64; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
+const IDLE_MINUTES: [f64; 8] = [0., 1., 2., 5., 10., 15., 30., 60.];
 
 gpui_kit::actions!(brouyon, [CloseSettings]);
 
@@ -126,11 +123,8 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
 }
 
 /// Every delay on offer, shortest first, including one set by hand in the file.
-fn idle_options(current: Option<Duration>) -> Vec<Option<Duration>> {
-    let mut options: Vec<_> = IDLE_MINUTES
-        .iter()
-        .map(|&minutes| (minutes > 0).then(|| Duration::from_secs(minutes * 60)))
-        .collect();
+fn idle_options(current: Option<IdleDelay>) -> Vec<Option<IdleDelay>> {
+    let mut options = IDLE_MINUTES.map(IdleDelay::from_minutes).to_vec();
     if !options.contains(&current) {
         options.push(current);
         options.sort();
@@ -138,8 +132,8 @@ fn idle_options(current: Option<Duration>) -> Vec<Option<Duration>> {
     options
 }
 
-fn idle_label(idle: Option<Duration>) -> String {
-    match idle.map(|idle| idle.as_secs()) {
+fn idle_label(idle: Option<IdleDelay>) -> String {
+    match idle.map(|idle| idle.get().as_secs()) {
         None => "Never".into(),
         Some(60) => "After 1 minute".into(),
         Some(3600) => "After 1 hour".into(),
@@ -152,7 +146,7 @@ pub struct SettingsWindow {
     app: Entity<Brouyon>,
     app_window: WindowHandle<Brouyon>,
     section: Section,
-    idle_options: Vec<Option<Duration>>,
+    idle_options: Vec<Option<IdleDelay>>,
     idle_choice: Entity<ChoiceState>,
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -238,7 +232,7 @@ impl SettingsWindow {
                 .update(cx, |app, window, cx| match answer {
                     Ok(Ok(Some(paths))) => {
                         if let Some(dir) = paths.into_iter().next() {
-                            app.set_notes_dir(Some(dir), window, cx);
+                            app.set_notes_dir(Some(NotesDir::new(dir)), window, cx);
                         }
                     }
                     Ok(Err(error)) => {
@@ -349,31 +343,26 @@ impl SettingsWindow {
         });
         let percent = config.text_percent;
         let text_size_button =
-            |id: &'static str, label: String, to: u32, cx: &mut Context<Self>| {
+            |id: &'static str, label: String, to: TextPercent, cx: &mut Context<Self>| {
                 button(id, label, ButtonVariant::Outline, cx)
                     .debug_selector(move || id.into())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app.update(cx, |app, cx| app.set_text_percent(to, cx));
                     }))
             };
-        let smaller = text_size_button(
-            "text-smaller",
-            "−".into(),
-            percent.saturating_sub(TEXT_PERCENT_STEP),
-            cx,
-        )
-        .accessibility_label("Decrease text size")
-        .disabled(percent <= MIN_TEXT_PERCENT);
+        let smaller = text_size_button("text-smaller", "−".into(), percent.smaller(), cx)
+            .accessibility_label("Decrease text size")
+            .disabled(percent == TextPercent::MIN);
         let reset = text_size_button(
             "text-reset",
-            format!("{percent} %"),
-            DEFAULT_TEXT_PERCENT,
+            format!("{} %", percent.get()),
+            TextPercent::default(),
             cx,
         )
         .accessibility_label("Reset text size to the desktop's");
-        let larger = text_size_button("text-larger", "+".into(), percent + TEXT_PERCENT_STEP, cx)
+        let larger = text_size_button("text-larger", "+".into(), percent.larger(), cx)
             .accessibility_label("Increase text size")
-            .disabled(percent >= MAX_TEXT_PERCENT);
+            .disabled(percent == TextPercent::MAX);
 
         page()
             .child(
@@ -656,11 +645,12 @@ impl SettingsWindow {
 mod tests {
     use super::*;
     use crate::app::tests::{draw, keys, on_this_system, open, open_with, type_and_save};
+    use crate::checked::TextScale;
     use crate::config::Config;
     use crate::desktop::Transparency;
     use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
     use gpui_omarchy::Theme;
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, time::Duration};
 
     /// Opens Settings with its shortcut, and a context to act in that window.
     fn open_settings(
@@ -746,7 +736,7 @@ mod tests {
         let (settings, mut settings_cx) = open_settings(&view, cx);
         let base = cx.update(|window, _| window.rem_size());
 
-        cx.update(|_, cx| cx.global_mut::<Desktop>().text_scale = 2.);
+        cx.update(|_, cx| cx.global_mut::<Desktop>().text_scale = TextScale::new(2.).unwrap());
         cx.run_until_parked();
         draw(cx);
         draw(&mut settings_cx);
@@ -924,7 +914,7 @@ mod tests {
 
         click("text-larger", &mut settings_cx);
         draw(cx);
-        assert_eq!(config(&view, cx).text_percent, 110);
+        assert_eq!(config(&view, cx).text_percent.get(), 110);
         cx.update(|window, _| assert_eq!(window.rem_size(), base * 1.1));
         settings
             .update(&mut settings_cx, |_, window, _| {
@@ -938,12 +928,16 @@ mod tests {
         );
 
         click("text-reset", &mut settings_cx);
-        assert_eq!(config(&view, cx).text_percent, 100);
+        assert_eq!(config(&view, cx).text_percent.get(), 100);
 
         for _ in 0..4 {
             click("text-smaller", &mut settings_cx);
         }
-        assert_eq!(config(&view, cx).text_percent, 80, "stops at the minimum");
+        assert_eq!(
+            config(&view, cx).text_percent.get(),
+            80,
+            "stops at the minimum"
+        );
     }
 
     #[gpui_kit::test]
@@ -951,13 +945,13 @@ mod tests {
         let (_dir, view, cx) = open(cx);
         cx.simulate_input("kept");
         keys(cx, "ctrl-=");
-        assert_eq!(config(&view, cx).text_percent, 110);
+        assert_eq!(config(&view, cx).text_percent.get(), 110);
         keys(cx, "ctrl-+");
-        assert_eq!(config(&view, cx).text_percent, 120);
+        assert_eq!(config(&view, cx).text_percent.get(), 120);
         keys(cx, "ctrl--");
-        assert_eq!(config(&view, cx).text_percent, 110);
+        assert_eq!(config(&view, cx).text_percent.get(), 110);
         keys(cx, "ctrl-0");
-        assert_eq!(config(&view, cx).text_percent, 100);
+        assert_eq!(config(&view, cx).text_percent.get(), 100);
         cx.update(|_, cx| assert_eq!(view.read(cx).editor_text(cx), "kept"));
     }
 
@@ -967,11 +961,11 @@ mod tests {
         for _ in 0..14 {
             keys(cx, "ctrl-=");
         }
-        assert_eq!(config(&view, cx).text_percent, MAX_TEXT_PERCENT);
+        assert_eq!(config(&view, cx).text_percent, TextPercent::MAX);
         for _ in 0..14 {
             keys(cx, "ctrl--");
         }
-        assert_eq!(config(&view, cx).text_percent, MIN_TEXT_PERCENT);
+        assert_eq!(config(&view, cx).text_percent, TextPercent::MIN);
     }
 
     #[gpui_kit::test]
@@ -983,7 +977,10 @@ mod tests {
 
         // The list opens on the current delay, 5 minutes: two up is 1 minute.
         keys(&mut settings_cx, "enter up up enter");
-        assert_eq!(config(&view, cx).idle, Some(Duration::from_secs(60)));
+        assert_eq!(
+            config(&view, cx).idle.map(IdleDelay::get),
+            Some(Duration::from_secs(60))
+        );
         assert!(config(&view, cx).saved_text().contains("idle_minutes = 1"));
 
         crate::app::tests::wait(cx, Duration::from_secs(60));
@@ -1001,13 +998,13 @@ mod tests {
 
     #[test]
     fn a_delay_set_by_hand_is_offered_too() {
-        let options = idle_options(Some(Duration::from_secs(6)));
+        let options = idle_options(IdleDelay::from_minutes(0.1));
         assert_eq!(options.len(), IDLE_MINUTES.len() + 1);
         assert_eq!(options[0], None);
-        assert_eq!(options[1], Some(Duration::from_secs(6)));
+        assert_eq!(options[1].map(IdleDelay::get), Some(Duration::from_secs(6)));
         assert_eq!(idle_label(options[1]), "After 6 seconds");
         assert_eq!(
-            idle_options(Some(Duration::from_secs(300))).len(),
+            idle_options(IdleDelay::from_minutes(5.)).len(),
             IDLE_MINUTES.len(),
             "an offered delay isn't listed twice"
         );
@@ -1016,12 +1013,9 @@ mod tests {
     #[test]
     fn delays_read_naturally() {
         assert_eq!(idle_label(None), "Never");
-        assert_eq!(idle_label(Some(Duration::from_secs(60))), "After 1 minute");
-        assert_eq!(
-            idle_label(Some(Duration::from_secs(120))),
-            "After 2 minutes"
-        );
-        assert_eq!(idle_label(Some(Duration::from_secs(3600))), "After 1 hour");
+        assert_eq!(idle_label(IdleDelay::from_minutes(1.)), "After 1 minute");
+        assert_eq!(idle_label(IdleDelay::from_minutes(2.)), "After 2 minutes");
+        assert_eq!(idle_label(IdleDelay::from_minutes(60.)), "After 1 hour");
     }
 
     fn texts(dir: &Path) -> Vec<String> {
@@ -1036,7 +1030,7 @@ mod tests {
 
         cx.simulate_input("typed just now");
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(new.path().to_owned()), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(new.path())), window, cx);
         });
         cx.run_until_parked();
 
@@ -1065,13 +1059,13 @@ mod tests {
         let (default, view, cx) = open(cx);
         let other = tempfile::tempdir().unwrap();
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(other.path().to_owned()), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(other.path())), window, cx);
         });
         let (_settings, mut settings_cx) = open_settings(&view, cx);
         click("section-Notes", &mut settings_cx);
         click("default-folder", &mut settings_cx);
 
-        assert_eq!(config(&view, cx).notes_dir, default.path());
+        assert_eq!(&*config(&view, cx).notes_dir, default.path());
         assert!(!config(&view, cx).saved_text().contains("notes_dir"));
     }
 
@@ -1083,11 +1077,11 @@ mod tests {
         fs::write(&blocked, "").unwrap();
 
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(blocked.join("notes")), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(blocked.join("notes"))), window, cx);
         });
         cx.run_until_parked();
 
-        assert_eq!(config(&view, cx).notes_dir, dir.path());
+        assert_eq!(&*config(&view, cx).notes_dir, dir.path());
         assert!(!config(&view, cx).saved_text().contains("notes_dir"));
         cx.update(|_, cx| {
             let this = view.read(cx);
@@ -1110,7 +1104,7 @@ mod tests {
         });
 
         view.update_in(cx, |this, window, cx| {
-            this.set_notes_dir(Some(new.path().to_owned()), window, cx);
+            this.set_notes_dir(Some(NotesDir::new(new.path())), window, cx);
         });
         cx.update(|_, cx| assert!(!view.read(cx).has_question()));
         assert!(new.path().join(".trash/same.md").exists());
@@ -1132,7 +1126,7 @@ mod tests {
             Some(vec![path])
         });
         cx.run_until_parked();
-        assert_eq!(config(&view, cx).notes_dir, picked.path());
+        assert_eq!(&*config(&view, cx).notes_dir, picked.path());
     }
 
     #[gpui_kit::test]
@@ -1143,7 +1137,7 @@ mod tests {
         click("choose-folder", &mut settings_cx);
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
-        assert_eq!(config(&view, cx).notes_dir, dir.path());
+        assert_eq!(&*config(&view, cx).notes_dir, dir.path());
         cx.update(|_, cx| assert!(view.read(cx).settings_problem.is_none()));
     }
 

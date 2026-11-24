@@ -1,6 +1,7 @@
 //! Notes as plain files. Each note is one UTF-8 `.md` file in a single folder,
 //! trashed notes move to its `.trash` subfolder, and no other metadata exists.
 
+use crate::checked::NotesDir;
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -94,8 +95,8 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
-        let dir = dir.into();
+    pub fn open(dir: &NotesDir) -> io::Result<Self> {
+        let dir = dir.to_path_buf();
         let trash = dir.join(TRASH_DIR);
         fs::create_dir_all(&trash)?;
         Ok(Self { dir, trash })
@@ -403,7 +404,7 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let store = Store::open(&NotesDir::new(dir.path())).unwrap();
         (dir, store)
     }
 

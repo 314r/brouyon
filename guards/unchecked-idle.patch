@@ -1,0 +1,25 @@
+Mistake: before 25a48ef, a huge idle_minutes panicked at launch and a tiny one blanked the note between keys
+Run: cargo check --locked --quiet
+Says: expected `Option<IdleDelay>`, found `Option<Duration>`
+
+diff --git i/src/config.rs w/src/config.rs
+index 1ceaaac..4e4cadc 100644
+--- i/src/config.rs
++++ w/src/config.rs
+@@ -8,6 +8,7 @@ use serde::Deserialize;
+ use std::{
+     env, fmt, fs, io,
+     path::{Path, PathBuf},
++    time::Duration,
+ };
+ use toml_edit::DocumentMut;
+ 
+@@ -122,7 +123,7 @@ impl Config {
+             path,
+             default_notes_dir,
+             notes_dir,
+-            idle: IdleDelay::from_minutes(minutes),
++            idle: (minutes > 0.).then(|| Duration::from_secs_f64(minutes * 60.)),
+             theme: file.theme.unwrap_or_default(),
+             text_percent: file
+                 .text_percent

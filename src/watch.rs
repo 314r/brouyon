@@ -149,13 +149,13 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::{testing::*, *};
-    use crate::store::Store;
+    use crate::{checked::NotesDir, store::Store};
 
     /// A notes folder inside a temporary one, as a notes folder is inside Dropbox.
     fn notes() -> (tempfile::TempDir, Store, PathBuf) {
         let outside = tempfile::tempdir().unwrap();
         let dir = outside.path().join("notes");
-        let store = Store::open(&dir).unwrap();
+        let store = Store::open(&NotesDir::new(&dir)).unwrap();
         (outside, store, dir)
     }
 

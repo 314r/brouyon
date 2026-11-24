@@ -1,0 +1,26 @@
+Mistake: before 25a48ef, a notes_dir of "~", "" or a relative folder was under whichever folder the app was launched from
+Run: cargo check --locked --quiet
+Says: expected `NotesDir`, found `PathBuf`
+
+diff --git i/src/config.rs w/src/config.rs
+index 1ceaaac..77d3e28 100644
+--- i/src/config.rs
++++ w/src/config.rs
+@@ -107,13 +107,11 @@ impl Config {
+         // so notes never land in whichever folder the app was launched from.
+         let notes_dir = file
+             .notes_dir
+-            .filter(|dir| !dir.is_empty())
+-            .map(|dir| match dir.strip_prefix('~') {
+-                Some("") => home.to_owned(),
+-                Some(rest) if rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+-                _ => home.join(dir),
++            .map(|dir| match dir.strip_prefix("~/") {
++                Some(rest) => home.join(rest),
++                None => PathBuf::from(dir),
+             })
+-            .map_or_else(|| default_notes_dir.clone(), NotesDir::new);
++            .unwrap_or_else(|| default_notes_dir.clone());
+         let minutes = file
+             .idle_minutes
+             .filter(|minutes| minutes.is_finite() && *minutes >= 0.)

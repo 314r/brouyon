@@ -1,27 +1,19 @@
 //! User settings in `config.toml`.
 
-use crate::store::write_atomically;
+use crate::{
+    checked::{IdleDelay, NotesDir, TextPercent, TextScale},
+    store::write_atomically,
+};
 use serde::Deserialize;
 use std::{
     env, fmt, fs, io,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use toml_edit::DocumentMut;
 
 const DEFAULT_IDLE_MINUTES: f64 = 5.;
-/// Shorter than this, a note would be gone between two keys.
-const MIN_IDLE: Duration = Duration::from_secs(1);
-/// A year. Longer can't be told from never, and a file can hold numbers too large
-/// for a timer to count to.
-const MAX_IDLE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// The size gpui-omarchy's metrics assume, matching Omarchy's default text size.
 const BASE_REM_SIZE: f32 = 16.;
-
-pub const MIN_TEXT_PERCENT: u32 = 80;
-pub const MAX_TEXT_PERCENT: u32 = 200;
-pub const TEXT_PERCENT_STEP: u32 = 10;
-pub const DEFAULT_TEXT_PERCENT: u32 = 100;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -77,13 +69,13 @@ impl CopyFormat {
 pub struct Config {
     /// The file these settings are saved to.
     path: PathBuf,
-    pub default_notes_dir: PathBuf,
-    pub notes_dir: PathBuf,
+    pub default_notes_dir: NotesDir,
+    pub notes_dir: NotesDir,
     /// How long without activity before moving to a blank note. `None` disables it.
-    pub idle: Option<Duration>,
+    pub idle: Option<IdleDelay>,
     pub theme: ThemeMode,
     /// Scales the desktop's text size throughout the app.
-    pub text_percent: u32,
+    pub text_percent: TextPercent,
     /// The format last chosen for copying a note, which the button uses again.
     pub copy_as: CopyFormat,
 }
@@ -110,7 +102,7 @@ impl Config {
     }
 
     fn resolve(file: FileConfig, path: PathBuf, data_home: &Path, home: &Path) -> Self {
-        let default_notes_dir = data_home.join("brouyon");
+        let default_notes_dir = NotesDir::new(data_home.join("brouyon"));
         // Joining leaves an absolute folder as it is and puts any other under home,
         // so notes never land in whichever folder the app was launched from.
         let notes_dir = file
@@ -121,7 +113,7 @@ impl Config {
                 Some(rest) if rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
                 _ => home.join(dir),
             })
-            .unwrap_or_else(|| default_notes_dir.clone());
+            .map_or_else(|| default_notes_dir.clone(), NotesDir::new);
         let minutes = file
             .idle_minutes
             .filter(|minutes| minutes.is_finite() && *minutes >= 0.)
@@ -130,15 +122,12 @@ impl Config {
             path,
             default_notes_dir,
             notes_dir,
-            idle: (minutes > 0.).then(|| {
-                Duration::try_from_secs_f64(minutes * 60.)
-                    .unwrap_or(MAX_IDLE)
-                    .clamp(MIN_IDLE, MAX_IDLE)
-            }),
+            idle: IdleDelay::from_minutes(minutes),
             theme: file.theme.unwrap_or_default(),
-            text_percent: normalized_text_percent(
-                file.text_percent.unwrap_or(DEFAULT_TEXT_PERCENT),
-            ),
+            text_percent: file
+                .text_percent
+                .map(TextPercent::nearest)
+                .unwrap_or_default(),
             copy_as: file.copy_as.unwrap_or_default(),
         }
     }
@@ -149,11 +138,11 @@ impl Config {
     pub fn for_test(notes_dir: &Path) -> Self {
         Self {
             path: notes_dir.join(".settings/config.toml"),
-            default_notes_dir: notes_dir.to_owned(),
-            notes_dir: notes_dir.to_owned(),
-            idle: Some(Duration::from_secs(300)),
+            default_notes_dir: NotesDir::new(notes_dir),
+            notes_dir: NotesDir::new(notes_dir),
+            idle: IdleDelay::from_minutes(5.),
             theme: ThemeMode::default(),
-            text_percent: DEFAULT_TEXT_PERCENT,
+            text_percent: TextPercent::default(),
             copy_as: CopyFormat::default(),
         }
     }
@@ -164,8 +153,8 @@ impl Config {
     }
 
     /// The window's rem size for the desktop's text size and the chosen scale.
-    pub fn rem_px(&self, desktop_text_scale: f32) -> f32 {
-        BASE_REM_SIZE * desktop_text_scale * self.text_percent as f32 / 100.
+    pub fn rem_px(&self, desktop_text_scale: TextScale) -> f32 {
+        BASE_REM_SIZE * desktop_text_scale.get() * self.text_percent.get() as f32 / 100.
     }
 
     /// Each setter applies for this session even when saving fails, and returns
@@ -175,9 +164,9 @@ impl Config {
         self.save("theme", Some(theme.key().into()))
     }
 
-    pub fn set_text_percent(&mut self, percent: u32) -> io::Result<()> {
-        self.text_percent = normalized_text_percent(percent);
-        self.save("text_percent", Some(i64::from(self.text_percent).into()))
+    pub fn set_text_percent(&mut self, percent: TextPercent) -> io::Result<()> {
+        self.text_percent = percent;
+        self.save("text_percent", Some(i64::from(percent.get()).into()))
     }
 
     pub fn set_copy_as(&mut self, format: CopyFormat) -> io::Result<()> {
@@ -185,9 +174,9 @@ impl Config {
         self.save("copy_as", Some(format.key().into()))
     }
 
-    pub fn set_idle(&mut self, idle: Option<Duration>) -> io::Result<()> {
+    pub fn set_idle(&mut self, idle: Option<IdleDelay>) -> io::Result<()> {
         self.idle = idle;
-        let minutes = idle.map_or(0., |idle| idle.as_secs_f64() / 60.);
+        let minutes = idle.map_or(0., |idle| idle.get().as_secs_f64() / 60.);
         let value = if minutes.fract() == 0. {
             (minutes as i64).into()
         } else {
@@ -197,7 +186,7 @@ impl Config {
     }
 
     /// `None` goes back to the default folder.
-    pub fn set_notes_dir(&mut self, dir: Option<PathBuf>) -> io::Result<()> {
+    pub fn set_notes_dir(&mut self, dir: Option<NotesDir>) -> io::Result<()> {
         self.notes_dir = dir
             .clone()
             .unwrap_or_else(|| self.default_notes_dir.clone());
@@ -278,12 +267,6 @@ fn invalid(path: &Path, error: impl fmt::Display) -> io::Error {
     )
 }
 
-/// The nearest offered size: whole steps within the limits.
-pub fn normalized_text_percent(percent: u32) -> u32 {
-    let steps = percent.saturating_add(TEXT_PERCENT_STEP / 2) / TEXT_PERCENT_STEP;
-    (steps * TEXT_PERCENT_STEP).clamp(MIN_TEXT_PERCENT, MAX_TEXT_PERCENT)
-}
-
 pub(crate) fn home_dir() -> PathBuf {
     env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
@@ -298,6 +281,7 @@ pub(crate) fn xdg_dir(variable: &str, fallback: &str, home: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn resolve(toml_text: &str) -> Config {
         let file: FileConfig = toml::from_str(toml_text).unwrap();
@@ -339,18 +323,21 @@ mod tests {
     #[test]
     fn defaults_use_the_data_folder_five_minutes_and_the_desktop_theme() {
         let config = resolve("");
-        assert_eq!(config.notes_dir, PathBuf::from("/data/brouyon"));
-        assert_eq!(config.default_notes_dir, PathBuf::from("/data/brouyon"));
-        assert_eq!(config.idle, Some(Duration::from_secs(300)));
+        assert_eq!(&*config.notes_dir, PathBuf::from("/data/brouyon"));
+        assert_eq!(&*config.default_notes_dir, PathBuf::from("/data/brouyon"));
+        assert_eq!(
+            config.idle.map(IdleDelay::get),
+            Some(Duration::from_secs(300))
+        );
         assert_eq!(config.theme, ThemeMode::Omarchy);
-        assert_eq!(config.text_percent, 100);
+        assert_eq!(config.text_percent.get(), 100);
         assert_eq!(config.copy_as, CopyFormat::Markdown);
     }
 
     #[test]
     fn idle_minutes_accepts_fractions_and_zero_disables_it() {
         assert_eq!(
-            resolve("idle_minutes = 0.5").idle,
+            resolve("idle_minutes = 0.5").idle.map(IdleDelay::get),
             Some(Duration::from_secs(30))
         );
         assert_eq!(resolve("idle_minutes = 0").idle, None);
@@ -359,7 +346,7 @@ mod tests {
     #[test]
     fn a_negative_idle_delay_falls_back_to_the_default() {
         assert_eq!(
-            resolve("idle_minutes = -3.0").idle,
+            resolve("idle_minutes = -3.0").idle.map(IdleDelay::get),
             Some(Duration::from_secs(300))
         );
     }
@@ -367,26 +354,26 @@ mod tests {
     #[test]
     fn notes_dir_expands_a_leading_tilde() {
         assert_eq!(
-            resolve(r#"notes_dir = "~/Notes""#).notes_dir,
+            &*resolve(r#"notes_dir = "~/Notes""#).notes_dir,
             PathBuf::from("/home/me/Notes")
         );
         assert_eq!(
-            resolve(r#"notes_dir = "/srv/notes""#).notes_dir,
+            &*resolve(r#"notes_dir = "/srv/notes""#).notes_dir,
             PathBuf::from("/srv/notes")
         );
     }
 
     #[test]
     fn an_idle_delay_too_long_or_too_short_to_count_is_brought_within_reach() {
-        assert_eq!(resolve("idle_minutes = 1e300").idle, Some(MAX_IDLE));
-        assert_eq!(resolve("idle_minutes = 1e17").idle, Some(MAX_IDLE));
-        assert_eq!(resolve("idle_minutes = 1e-9").idle, Some(MIN_IDLE));
+        assert_eq!(resolve("idle_minutes = 1e300").idle, Some(IdleDelay::MAX));
+        assert_eq!(resolve("idle_minutes = 1e17").idle, Some(IdleDelay::MAX));
+        assert_eq!(resolve("idle_minutes = 1e-9").idle, Some(IdleDelay::MIN));
         assert_eq!(
-            resolve("idle_minutes = inf").idle,
+            resolve("idle_minutes = inf").idle.map(IdleDelay::get),
             Some(Duration::from_secs(300))
         );
         assert_eq!(
-            resolve("idle_minutes = nan").idle,
+            resolve("idle_minutes = nan").idle.map(IdleDelay::get),
             Some(Duration::from_secs(300))
         );
     }
@@ -394,15 +381,15 @@ mod tests {
     #[test]
     fn notes_dir_is_never_relative_to_wherever_the_app_was_launched() {
         assert_eq!(
-            resolve(r#"notes_dir = "~""#).notes_dir,
+            &*resolve(r#"notes_dir = "~""#).notes_dir,
             PathBuf::from("/home/me")
         );
         assert_eq!(
-            resolve(r#"notes_dir = "Notes""#).notes_dir,
+            &*resolve(r#"notes_dir = "Notes""#).notes_dir,
             PathBuf::from("/home/me/Notes")
         );
         assert_eq!(
-            resolve(r#"notes_dir = """#).notes_dir,
+            &*resolve(r#"notes_dir = """#).notes_dir,
             PathBuf::from("/data/brouyon")
         );
     }
@@ -417,18 +404,18 @@ mod tests {
 
     #[test]
     fn text_size_snaps_to_whole_steps_within_the_limits() {
-        assert_eq!(resolve("text_percent = 134").text_percent, 130);
-        assert_eq!(resolve("text_percent = 135").text_percent, 140);
-        assert_eq!(resolve("text_percent = 10").text_percent, 80);
-        assert_eq!(resolve("text_percent = 900").text_percent, 200);
-        assert_eq!(resolve("text_percent = 4294967295").text_percent, 200);
+        assert_eq!(resolve("text_percent = 134").text_percent.get(), 130);
+        assert_eq!(resolve("text_percent = 135").text_percent.get(), 140);
+        assert_eq!(resolve("text_percent = 10").text_percent.get(), 80);
+        assert_eq!(resolve("text_percent = 900").text_percent.get(), 200);
+        assert_eq!(resolve("text_percent = 4294967295").text_percent.get(), 200);
     }
 
     #[test]
     fn rem_size_combines_the_desktop_size_and_the_chosen_scale() {
         let config = resolve("text_percent = 150");
-        assert_eq!(config.rem_px(1.), 24.);
-        assert_eq!(config.rem_px(2.), 48.);
+        assert_eq!(config.rem_px(TextScale::new(1.).unwrap()), 24.);
+        assert_eq!(config.rem_px(TextScale::new(2.).unwrap()), 48.);
     }
 
     #[test]
@@ -464,34 +451,44 @@ mod tests {
     fn saving_creates_the_file_and_every_setting_survives_a_restart() {
         let (_dir, mut config) = in_temp_dir(None);
         config.set_theme(ThemeMode::Light).unwrap();
-        config.set_text_percent(120).unwrap();
-        config.set_idle(Some(Duration::from_secs(600))).unwrap();
-        config.set_notes_dir(Some("/srv/notes".into())).unwrap();
+        config.set_text_percent(TextPercent::nearest(120)).unwrap();
+        config.set_idle(IdleDelay::from_minutes(10.)).unwrap();
+        config
+            .set_notes_dir(Some(NotesDir::new("/srv/notes")))
+            .unwrap();
         config.set_copy_as(CopyFormat::Text).unwrap();
         assert_eq!(reloaded(&config), config);
         assert_eq!(config.copy_as, CopyFormat::Text);
         assert_eq!(config.theme, ThemeMode::Light);
-        assert_eq!(config.text_percent, 120);
-        assert_eq!(config.idle, Some(Duration::from_secs(600)));
-        assert_eq!(config.notes_dir, PathBuf::from("/srv/notes"));
+        assert_eq!(config.text_percent.get(), 120);
+        assert_eq!(
+            config.idle.map(IdleDelay::get),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(&*config.notes_dir, PathBuf::from("/srv/notes"));
     }
 
     #[test]
     fn idle_minutes_are_written_as_people_would_write_them() {
         let (_dir, mut config) = in_temp_dir(None);
-        config.set_idle(Some(Duration::from_secs(600))).unwrap();
+        config.set_idle(IdleDelay::from_minutes(10.)).unwrap();
         assert_eq!(saved(&config), "idle_minutes = 10\n");
         config.set_idle(None).unwrap();
         assert_eq!(saved(&config), "idle_minutes = 0\n");
-        config.set_idle(Some(Duration::from_secs(90))).unwrap();
+        config.set_idle(IdleDelay::from_minutes(1.5)).unwrap();
         assert_eq!(saved(&config), "idle_minutes = 1.5\n");
-        assert_eq!(reloaded(&config).idle, Some(Duration::from_secs(90)));
+        assert_eq!(
+            reloaded(&config).idle.map(IdleDelay::get),
+            Some(Duration::from_secs(90))
+        );
     }
 
     #[test]
     fn the_default_folder_is_stored_by_having_no_key() {
         let (_dir, mut config) = in_temp_dir(None);
-        config.set_notes_dir(Some("/srv/notes".into())).unwrap();
+        config
+            .set_notes_dir(Some(NotesDir::new("/srv/notes")))
+            .unwrap();
         assert!(saved(&config).contains("notes_dir"));
         config.set_notes_dir(None).unwrap();
         assert!(!saved(&config).contains("notes_dir"));
@@ -504,7 +501,7 @@ mod tests {
             "# my setup\nnotes_dir = \"~/Notes\" # synced\nidle_minutes = 5\n",
         ));
         config.set_theme(ThemeMode::Dark).unwrap();
-        config.set_idle(Some(Duration::from_secs(60))).unwrap();
+        config.set_idle(IdleDelay::from_minutes(1.)).unwrap();
         let text = saved(&config);
         assert!(text.contains("# my setup"), "{text}");
         assert!(text.contains("notes_dir = \"~/Notes\" # synced"), "{text}");
@@ -518,7 +515,9 @@ mod tests {
             "theme = \"light\" # easier in the sun\nnotes_dir = \"~/Notes\" # synced\n",
         ));
         config.set_theme(ThemeMode::Dark).unwrap();
-        config.set_notes_dir(Some("/srv/notes".into())).unwrap();
+        config
+            .set_notes_dir(Some(NotesDir::new("/srv/notes")))
+            .unwrap();
         assert_eq!(
             saved(&config),
             "theme = \"dark\" # easier in the sun\nnotes_dir = \"/srv/notes\" # synced\n"
@@ -530,8 +529,8 @@ mod tests {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
         let (_dir, mut config) = in_temp_dir(None);
         let folder = PathBuf::from(OsStr::from_bytes(b"/srv/not\xffutf8"));
-        assert!(config.set_notes_dir(Some(folder.clone())).is_err());
-        assert_eq!(config.notes_dir, folder);
+        assert!(config.set_notes_dir(Some(NotesDir::new(&folder))).is_err());
+        assert_eq!(&*config.notes_dir, folder);
     }
 
     #[test]
