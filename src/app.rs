@@ -319,7 +319,10 @@ pub struct Brouyon {
     before_trash: Option<NoteId>,
     /// Rebuilt for each note, so undo history never crosses between notes.
     editor: Entity<EditorState>,
-    _editor_events: Subscription,
+    _editor_events: [Subscription; 2],
+    /// What the editor held when last looked at, to tell a change to its text from
+    /// anything else that happens in it.
+    seen: SharedString,
     /// The field above the list. What it holds only counts while it is open.
     filter: Entity<InputState>,
     filter_open: bool,
@@ -362,7 +365,7 @@ pub struct Brouyon {
 impl Brouyon {
     pub fn new(store: Store, config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = build_editor("", false, window, cx);
-        let editor_events = cx.subscribe_in(&editor, window, Self::on_editor_event);
+        let editor_events = Self::follow_editor(&editor, window, cx);
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
         let subscriptions = vec![
             cx.subscribe_in(&filter, window, Self::on_filter_event),
@@ -389,6 +392,7 @@ impl Brouyon {
             before_trash: None,
             editor,
             _editor_events: editor_events,
+            seen: SharedString::default(),
             filter,
             filter_open: false,
             filter_terms: Vec::new(),
@@ -435,9 +439,55 @@ impl Brouyon {
         cx: &mut Context<Self>,
     ) {
         self.editor = build_editor(text, readonly, window, cx);
+        self.seen = self.editor.read(cx).value();
         self.words = markdown::word_count(text);
-        self._editor_events = cx.subscribe_in(&self.editor, window, Self::on_editor_event);
+        self._editor_events = Self::follow_editor(&self.editor, window, cx);
         self.focus_content(window, cx);
+    }
+
+    fn follow_editor(
+        editor: &Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> [Subscription; 2] {
+        [
+            cx.observe_in(editor, window, Self::on_editor_notify),
+            cx.subscribe_in(editor, window, Self::on_editor_event),
+        ]
+    }
+
+    /// Looks for a change to the text, whatever happened in the editor. Its
+    /// `InputEvent::Change` is no substitute: it isn't emitted for what an input method
+    /// composes, which stays in the text when the composition is just ended.
+    fn on_editor_notify(
+        &mut self,
+        editor: Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = editor.read(cx);
+        if *editor.text() == *self.seen {
+            return;
+        }
+        self.seen = editor.value();
+        self.dirty = true;
+        let words = markdown::word_count(&self.seen);
+        if words != self.words {
+            self.words = words;
+            cx.notify();
+        }
+        self.restart_idle_timer(window, cx);
+        self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            this.update_in(cx, |this, window, cx| {
+                // A change that arrived during the typing was left for
+                // the save to settle, and can be taken now.
+                if this.flush(cx) {
+                    this.refresh_open_note(window, cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     fn on_editor_event(
@@ -447,32 +497,9 @@ impl Brouyon {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match event {
-            InputEvent::Change => {
-                self.dirty = true;
-                let words = markdown::word_count(&self.editor.read(cx).value());
-                if words != self.words {
-                    self.words = words;
-                    cx.notify();
-                }
-                self.restart_idle_timer(window, cx);
-                self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(SAVE_DELAY).await;
-                    this.update_in(cx, |this, window, cx| {
-                        // A change that arrived during the typing was left for
-                        // the save to settle, and can be taken now.
-                        if this.flush(cx) {
-                            this.refresh_open_note(window, cx);
-                        }
-                    })
-                    .ok();
-                }));
-            }
-            // The editor has made its new line by now. Shift+Enter keeps it plain.
-            InputEvent::PressEnter { shift: false, .. } => {
-                self.edit_list(lists::after_enter, window, cx);
-            }
-            _ => {}
+        // The editor has made its new line by now. Shift+Enter keeps it plain.
+        if let InputEvent::PressEnter { shift: false, .. } = event {
+            self.edit_list(lists::after_enter, window, cx);
         }
     }
 
@@ -861,6 +888,7 @@ impl Brouyon {
         self.editor.update(cx, |state, cx| {
             state.set_value(text.to_owned(), window, cx);
         });
+        self.seen = self.editor.read(cx).value();
         self.words = markdown::word_count(text);
         self.copied = None;
         self.copied_task = None;
@@ -2163,7 +2191,8 @@ pub(crate) mod tests {
     use crate::desktop::Transparency;
     use chrono::TimeZone;
     use gpui_kit::{
-        Focusable, Modifiers, TestAppContext, VisualTestContext, base::actions, point, px,
+        EntityInputHandler, Focusable, Modifiers, TestAppContext, VisualTestContext, base::actions,
+        point, px,
     };
     use std::{
         fs::{self, File},
@@ -2311,6 +2340,84 @@ pub(crate) mod tests {
 
         type_and_save(cx, " world");
         assert_eq!(note_texts(dir.path()), ["hello world"], "no second file");
+    }
+
+    /// Has an input method show `text` in the note, in place of what it showed before,
+    /// as it does until a word is settled on.
+    fn compose(view: &Entity<Brouyon>, cx: &mut VisualTestContext, text: &str) {
+        with_input_method(view, cx, |state, window, cx| {
+            state.replace_and_mark_text_in_range(None, text, None, window, cx);
+        });
+    }
+
+    /// Ends the composition with its text left as it is. A click does this, and so does
+    /// choosing a suggestion on an iPhone.
+    fn keep_composed(view: &Entity<Brouyon>, cx: &mut VisualTestContext) {
+        with_input_method(view, cx, |state, window, cx| state.unmark_text(window, cx));
+    }
+
+    fn with_input_method(
+        view: &Entity<Brouyon>,
+        cx: &mut VisualTestContext,
+        act: impl FnOnce(&mut EditorState, &mut Window, &mut Context<EditorState>),
+    ) {
+        cx.update(|window, cx| {
+            let editor = view.read(cx).editor.clone();
+            editor.update(cx, |state, cx| act(state, window, cx));
+        });
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn composed_text_is_saved_after_a_pause(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        compose(&view, cx, "compos");
+        wait(cx, SAVE_DELAY / 2);
+        compose(&view, cx, "composed");
+        keep_composed(&view, cx);
+        wait(cx, SAVE_DELAY / 2);
+        assert!(note_texts(dir.path()).is_empty(), "still within the pause");
+
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["composed"]);
+        assert_eq!(titles(&view, cx), ["composed"]);
+    }
+
+    #[gpui_kit::test]
+    fn composed_text_is_saved_when_leaving_the_note(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        compose(&view, cx, "composed");
+        keep_composed(&view, cx);
+        keys(cx, "ctrl-n");
+        assert_eq!(editor_text(&view, cx), "");
+        assert_eq!(note_texts(dir.path()), ["composed"]);
+    }
+
+    #[gpui_kit::test]
+    fn composed_text_is_saved_when_the_window_closes(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        compose(&view, cx, "composed");
+        keep_composed(&view, cx);
+        assert!(cx.simulate_close());
+        assert_eq!(note_texts(dir.path()), ["composed"]);
+    }
+
+    /// What is left of a word is what is on screen, so that is what is saved.
+    #[gpui_kit::test]
+    fn a_composition_cut_short_or_taken_back_leaves_what_is_on_screen(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        type_and_save(cx, "typed");
+        compose(&view, cx, " and");
+        keys(cx, "ctrl-n");
+        assert_eq!(note_texts(dir.path()), ["typed and"], "left half-way");
+
+        compose(&view, cx, "n");
+        wait(cx, SAVE_DELAY);
+        compose(&view, cx, "");
+        assert_eq!(editor_text(&view, cx), "");
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["typed and"], "taken back");
     }
 
     /// In the order `main` does it. A theme applied here replaces the one `init` has
@@ -2549,6 +2656,39 @@ pub(crate) mod tests {
             fs::metadata(&old).unwrap().modified().unwrap(),
             SystemTime::UNIX_EPOCH
         );
+    }
+
+    /// The editor tells of more than its text, such as its cursor, and of text it was
+    /// given to show.
+    #[gpui_kit::test]
+    fn looking_at_a_note_or_following_its_file_never_rewrites_it(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        let dated = |text: &str, seconds| {
+            fs::write(&path, text).unwrap();
+            let file = File::options().write(true).open(&path).unwrap();
+            let date = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+            file.set_modified(date).unwrap();
+            date
+        };
+        let date = dated("one\r\n\ttwo  \n\n", 1);
+        let (_dir, view, cx) = open_with(cx, dir);
+        let look = |cx: &mut VisualTestContext| {
+            keys(cx, "right shift-down");
+            assert!(!cx.update(|_, cx| view.read(cx).dirty));
+            wait(cx, SAVE_DELAY);
+            cx.update(|window, cx| view.update(cx, |this, cx| this.on_idle(window, cx)));
+            fs::metadata(&path).unwrap().modified().unwrap()
+        };
+        keys(cx, "alt-down");
+        assert_eq!(editor_text(&view, cx), "one\r\n\ttwo  \n\n");
+        assert_eq!(look(cx), date);
+
+        keys(cx, "alt-down");
+        let date = dated("three\r\n", 2);
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "three\r\n");
+        assert_eq!(look(cx), date);
     }
 
     #[gpui_kit::test]
@@ -3582,6 +3722,10 @@ pub(crate) mod tests {
         assert!(!shown(cx), "a blank note has none to count");
         cx.simulate_input("- [ ] three more words");
         assert_eq!(words(cx), 3, "before it is saved");
+        compose(&view, cx, " and one");
+        assert_eq!(words(cx), 5, "before it is settled on");
+        compose(&view, cx, "");
+        assert_eq!(words(cx), 3);
         assert!(shown(cx));
         let count = cx.debug_bounds("word-count").unwrap();
         let window = cx.update(|window, _| window.viewport_size().width);
@@ -3862,6 +4006,19 @@ pub(crate) mod tests {
 
     fn notice(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> Option<SharedString> {
         cx.update(|_, cx| view.read(cx).notice.clone())
+    }
+
+    #[gpui_kit::test]
+    fn composed_text_is_kept_when_its_note_changes_elsewhere(cx: &mut TestAppContext) {
+        let (dir, view, cx) = open(cx);
+        let path = saved_note(dir.path(), &view, cx, "mine");
+        compose(&view, cx, " composed");
+        keep_composed(&view, cx);
+        fs::write(&path, "theirs").unwrap();
+        notice_changes(&view, cx);
+        assert_eq!(editor_text(&view, cx), "mine composed");
+        wait(cx, SAVE_DELAY);
+        assert_eq!(note_texts(dir.path()), ["mine composed", "theirs"]);
     }
 
     fn cursor(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> usize {
