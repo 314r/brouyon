@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Checks the rules of this repository that no compiler knows. Each message names the fix.
+
+Run by bin/test and in CI. guards/ holds the past mistakes these rules catch, and
+tools/prove-guards puts them back to show it.
+"""
+
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+# Texts of other projects, and what quotes a mistake to catch it.
+NOT_OURS = ("LICENSES/", "THIRD-PARTY-LICENSES.txt", "Cargo.lock", "guards/", "tools/lint")
+
+
+def tracked():
+    """The text files git knows or would add, with their text."""
+    listed = subprocess.run(["git", "ls-files", "-z", "-co", "--exclude-standard"],
+                            cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    for name in filter(None, listed.split("\0")):
+        path = ROOT / name
+        if name.startswith((*NOT_OURS, ".claude/")) or not path.is_file():
+            continue
+        try:
+            yield name, path.read_text()
+        except UnicodeDecodeError:
+            continue
+
+
+def lines_with(text, pattern):
+    for number, line in enumerate(text.splitlines(), 1):
+        if re.search(pattern, line):
+            yield number, line
+
+
+def components():
+    return tomllib.loads((ROOT / "tools/third-party-licenses.toml").read_text()).get("component", [])
+
+
+def origin(component):
+    return component["source"].rstrip("/").rsplit("/", 1)[-1]
+
+
+def credits_match_the_code(files):
+    """6c59489 credited Omacut and Monologue for scripts that took nothing from them."""
+    authors = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["authors"]
+    for number, line in lines_with(files["LICENSE"], r"(?i)copyright \(c\)|adapted|come from"):
+        if not re.fullmatch(r"Copyright \(c\) \d{4} (.+)", line) or line.split(maxsplit=3)[3] not in authors:
+            yield (f"LICENSE:{number}: credits someone else. LICENSE covers this repository's own "
+                   "code. Code taken from elsewhere gets a [[component]] in "
+                   "tools/third-party-licenses.toml, naming the files it is in")
+
+    listed = {name for component in components() for name in component["files"]}
+    for path in sorted((ROOT / "LICENSES").iterdir()):
+        name = f"LICENSES/{path.name}"
+        if name not in listed:
+            yield (f"{name}: no [[component]] of tools/third-party-licenses.toml lists it. Add the "
+                   "component whose files it covers, or delete it")
+
+    for component in components():
+        taken = [path for path in component["paths"] if f"Adapted from {origin(component)}" in files.get(path, "")]
+        if not taken:
+            yield (f"tools/third-party-licenses.toml: {component['name']}: none of its paths says "
+                   f"\"Adapted from {origin(component)}\". Credit only code that was taken: compare "
+                   "the files with the source, then mark them or delete the component")
+
+    # A file that took code says so, and only such a file can be credited for it.
+    marked = {source.casefold() for name, text in files.items() if not name.endswith((".md", "LICENSE"))
+              for source in re.findall(r"Adapted from ([\w-]+)", text)}
+    for name, text in files.items():
+        if name.startswith("tools/third-party-licenses"):
+            continue
+        for match in re.finditer(r"(?i)adapted\s+from\s+\[?([\w-]+)", text):
+            if match.group(1).casefold() not in marked:
+                yield (f"{name}:{text.count(chr(10), 0, match.start()) + 1}: says something is adapted from "
+                       f"{match.group(1)}, and no file says \"Adapted from {match.group(1)}\". Compare the files "
+                       "with that source: mark the one that took code, or delete the claim")
+
+
+def brouyon_is_not_compared_with_drafts(files):
+    """Three requests to remove it, 171f85a to 935b5ca."""
+    for name, text in files.items():
+        for number, _ in lines_with(text, r"(?i)\bdrafts?\b"):
+            yield (f"{name}:{number}: mentions Drafts, which has nothing to do with Brouyon. Say what "
+                   "Brouyon does instead: it opens on a blank note, ready to type")
+
+
+RULES = [credits_match_the_code, brouyon_is_not_compared_with_drafts]
+
+
+def main():
+    files = dict(tracked())
+    problems = [problem for rule in RULES for problem in rule(files)]
+    for problem in problems:
+        print(problem)
+    print(f"{'FAIL' if problems else 'PASS'} tools/lint: {len(RULES)} rules, {len(files)} files")
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
