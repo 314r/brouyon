@@ -8,8 +8,8 @@
 
     check --confirm         records the covered code as it is now, once the model describes it
 
-Exit status: 0 when all is as recorded, 1 when a rule, a finding or a deliberate
-mistake isn't, 2 when the covered code changed since it was last confirmed.
+Exit status: 0 when all is as recorded, 1 when a rule breaks or a deliberate mistake
+gets through, 2 when the covered code changed since it was last confirmed.
 """
 
 import argparse
@@ -49,27 +49,23 @@ RULES = {
     "ConflictKeepsMine": "A conflict never drops the text typed here.",
     "QuittingKeepsMine": "Quitting never drops text that isn't in a file, unless it said it couldn't save.",
 }
-ALSO = ["TypeOK", "LoadedIsShown", "TrashIsReadOnly", "RefusedIsPending"]
+ALSO = ["TypeOK", "LoadedIsShown", "TrashIsReadOnly", "RefusedIsPending", "TakenIsMidway"]
 
-QUIET = {"GapIsQuiet": True}
-
-
-def case(breaks=(), lift=None, broken=None, past=None, names=2, texts=2):
+def case(breaks=(), broken=None, past=None, names=2, texts=2):
     """`past` is the commit that fixed the mistake: it was in the code before it."""
-    switches = dict(QUIET)
-    if lift:
-        switches[lift] = False
-    return {"breaks": list(breaks), "switches": switches, "broken": broken, "past": past,
-            "names": names, "texts": texts}
+    return {"breaks": list(breaks), "broken": broken, "past": past, "names": names, "texts": texts}
 
 
 CASES = {
-    # Everything but the finding.
+    # The code as it stands.
     "promise": case(names=3, texts=3),
-    # The finding: the code as it stands.
-    "finding-gap": case(
-        ["SaveKeepsTheirs", "RemoveKeepsTheirs", "PurgeKeepsTheirs"], lift="GapIsQuiet", texts=3),
     # Mistakes that were in the code. Each has to be caught again.
+    "mistake-save-in-two-calls": case(
+        ["SaveKeepsTheirs"], broken="save-in-two-calls", texts=3),
+    "mistake-remove-in-two-calls": case(
+        ["RemoveKeepsTheirs"], broken="remove-in-two-calls", texts=3),
+    "mistake-purge-in-two-calls": case(
+        ["PurgeKeepsTheirs"], broken="purge-in-two-calls", texts=3),
     "mistake-save-skips-its-check": case(
         ["SaveKeepsTheirs"], broken="save-skips-its-check", past="a1a7ee2"),
     "mistake-remove-skips-its-check": case(
@@ -84,6 +80,11 @@ CASES = {
     # Mistakes nobody has made yet, for the rules the others don't reach.
     "mistake-purge-skips-its-check": case(
         ["PurgeKeepsTheirs"], broken="purge-skips-its-check", texts=3),
+    "mistake-put-back-drops-what-comes-out": case(
+        ["SaveKeepsTheirs"], broken="put-back-drops-what-comes-out", texts=3),
+    "mistake-keep-takes-any-name": case(
+        ["SaveKeepsTheirs", "RemoveKeepsTheirs", "PurgeKeepsTheirs"],
+        broken="keep-takes-any-name", texts=3),
     "mistake-create-takes-any-name": case(["CreateKeepsTheirs"], broken="create-takes-any-name"),
     "mistake-trash-takes-any-name": case(["TrashKeepsTheirs"], broken="trash-takes-any-name"),
     "mistake-restore-takes-any-name": case(["RestoreKeepsTheirs"], broken="restore-takes-any-name"),
@@ -113,7 +114,6 @@ def tlc_jar():
 
 
 def config_of(settings, rules, symmetry=True):
-    switches = settings["switches"]
     broken = f'{{"{settings["broken"]}"}}' if settings["broken"] else "{}"
     names = ", ".join(f"n{i + 1}" for i in range(settings["names"]))
     texts = ", ".join(f"t{i + 1}" for i in range(settings["texts"]))
@@ -121,7 +121,6 @@ def config_of(settings, rules, symmetry=True):
         "SPECIFICATION Spec", "CONSTANTS",
         f"  Names = {{{names}}}", f"  Texts = {{{texts}}}",
         "  None = None", "  Empty = Empty",
-        *(f"  {name} = {str(value).upper()}" for name, value in switches.items()),
         f"  Broken = {broken}",
         *(["SYMMETRY Symmetry"] if symmetry else []),
         "INVARIANTS " + " ".join(rules), ""])
@@ -219,17 +218,33 @@ def told(action, before, after):
     if action == "SaveRead":
         return "Store::save reads the file. " + {
             '"flushed"': "It already holds the text.",
-            '"save.rename"': "It may be replaced.",
-            '"create.pick"': "It changed elsewhere, so the text goes into a new note.",
+            '"save.put"': "It may be replaced.",
+            '"create.move"': "It changed elsewhere, so the text goes into a new note.",
         }[after["pc"]]
-    if action == "SaveRename":
+    if action == "SavePut":
         held = files(before["notes"])[ident(before["selection"])]
-        return f"Store::save renames its temporary file over {selection}, which held {held}. It returns Written."
+        return f"Store::save swaps its temporary file with {selection}, which held {held}. " + {
+            '"flushed"': "It deletes what came out, and returns Written.",
+            '"save.back"': "The user hasn't seen what came out, so it has to go back.",
+            '"save.move"': "The note is gone, so there is nothing to swap with.",
+        }[after["pc"]]
+    if action == "SaveMove":
+        return f"Store::save moves its temporary file to {selection}, which nothing had. It returns Written."
+    if action == "SaveBack":
+        return "Store::save swaps again. " + (
+            "The file that changed is back, and the text goes into a new note."
+            if after["pc"] == '"create.move"' else "The swap fails, or what comes out changed too.")
+    if action == "SaveKeep":
+        return "Store::save gives the file it still holds a name nothing has. The text goes into a new note."
     if action == "RemoveRead":
         return "Store::remove_unchanged reads the file. " + (
-            "It may be deleted." if after["pc"] == '"remove.unlink"' else "It is gone, or changed elsewhere and is kept.")
-    if action == "RemoveUnlink":
-        return f"Store::remove_unchanged deletes {place(before['selection'])}."
+            "It may be deleted." if after["pc"] == '"remove.take"' else "It is gone, or changed elsewhere and is kept.")
+    if action == "RemoveTake":
+        return f"Store::remove_unchanged moves {place(before['selection'])} to its temporary name. " + (
+            "The user hasn't seen what it holds, so it has to go back."
+            if after["pc"] == '"remove.keep"' else "It deletes it.")
+    if action == "RemoveKeep":
+        return "Store::remove_unchanged puts the file back under a name nothing has."
     if action == "CreateMove":
         return f"Store::create moves its temporary file to {place(after['selection'])}."
     if action == "FlushFails":
@@ -248,8 +263,12 @@ def told(action, before, after):
         return "You answer no."
     if action == "Confirm":
         return f"You answer yes. Store::purge reads {place(before['selection'])}."
-    if action == "PurgeUnlink":
-        return f"Store::purge deletes {place(before['selection'])}."
+    if action == "PurgeTake":
+        return f"Store::purge moves {place(before['selection'])} to its temporary name. " + (
+            "The user hasn't seen what it holds, so it has to go back."
+            if after["pc"] == '"purge.keep"' else "It deletes it.")
+    if action == "PurgeKeep":
+        return "Store::purge puts the file back under a name nothing has."
     if action == "Sync":
         return f"sync_with_disk looks at the folder. The editor now holds {after['text']}."
     if action in ("TheyWrite", "TheyWriteInTrash"):
@@ -307,8 +326,9 @@ TOUCHES = {
     "src/app.rs": r"self\.store\.|self\.save_state\b|self\.loaded = |self\.selection = |\bKept\b|MayLeave"
                   r"|replace_editor\(|set_value\(|show_in_place\(|\.flush\(|quit_without_windows\(",
     "src/kept.rs": r"Kept|Warned|MayLeave|State::|remove_window\(|cx\.quit\(",
-    "src/store.rs": r"fs::(?:rename|remove_\w+|write)\(|File::create\(|write_(?:if|temp|atomically)\(|\breplace\("
-                    r"|renameat_with|move_new|move_to_free_name|remove_if_holds|\bgone\(",
+    "src/store.rs": r"fs::(?:rename|remove_\w+|write)\(|File::create(?:_new)?\(|write_atomically\(|\breplace\("
+                    r"|renameat_with|move_new|move_to_free_name|remove_if_holds|\bgone\(|\bswap\(|\bgap\("
+                    r"|Staged|Taken|keep_stale",
 }
 
 
@@ -366,7 +386,7 @@ def run_case(jar, name, workers):
         if idle:
             wrong.append(f"promise: these steps are never taken: {', '.join(idle)}")
         return wrong, f"{len(rest)} rules hold in {states(output)} states"
-    return wrong, f"still breaks {', '.join(expected)}; {len(rest)} other rules hold in {states(output)} states"
+    sys.exit(f"{name} is neither the promise nor a mistake")
 
 
 def report(status, name, messages, line):
@@ -418,12 +438,10 @@ def main():
     started = time.monotonic()
     jar = tlc_jar()
     wrong = []
-    # The big runs one at a time on every core, the mistakes side by side.
-    big = [name for name in CASES if not name.startswith("mistake-")]
-    for name in big:
-        messages, line = run_case(jar, name, "auto")
-        wrong += messages
-        report("ok" if name == "promise" else "KNOWN", name, messages, line)
+    # The big one on every core, then the mistakes side by side.
+    messages, line = run_case(jar, "promise", "auto")
+    wrong += messages
+    report("ok", "promise", messages, line)
     with concurrent.futures.ThreadPoolExecutor(max(1, (os.cpu_count() or 4) // 4)) as pool:
         small = [name for name in CASES if name.startswith("mistake-")]
         for name, (messages, line) in zip(small, pool.map(lambda n: run_case(jar, n, 2), small)):

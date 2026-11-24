@@ -5,15 +5,39 @@ Run: cargo test --locked --quiet kept_beside_the_typed_one
 Says: a_note_changed_elsewhere_while_typing_is_kept_beside_the_typed_one --- FAILED
 
 diff --git i/src/store.rs w/src/store.rs
-index 7e815aa..6e8ef37 100644
 --- i/src/store.rs
 +++ w/src/store.rs
-@@ -153,7 +153,7 @@ impl Store {
-                     Ok(false)
-                 }
-                 // Bytes, so a file that is no longer text counts as changed.
--                Ok(held) => Ok(held == loaded.as_bytes()),
-+                Ok(_) => Ok(true || loaded.is_empty()),
-                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-                 Err(error) => Err(error),
-             }
+@@ -136,31 +136,9 @@
+         let seen = [loaded, text];
+         keep_stale(&self.dir, id)?;
+         let staged = Staged::write(&self.dir, id, text)?;
+-        match fs::read(&target) {
+-            Ok(held) if held == text.as_bytes() => return Ok(Saved::Written),
+-            // Bytes, so a file that is no longer text counts as changed.
+-            Ok(held) if held != loaded.as_bytes() => return Ok(Saved::Changed),
+-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+-            _ => {}
+-        }
+         gap();
+-        let Some(taken) = staged.put(&target)? else {
+-            return Ok(Saved::Written);
+-        };
+-        let Some(unseen) = taken.drop_if_seen(&seen)? else {
+-            return Ok(Saved::Written);
+-        };
+-        gap();
+-        let back = swap(&unseen.0, &target);
+-        gap();
+-        let left = match back {
+-            Ok(()) => unseen.drop_if_seen(&seen)?,
+-            Err(_) => Some(unseen),
+-        };
+-        if let Some(left) = left {
+-            left.keep(&self.dir, id)?;
+-        }
+-        Ok(Saved::Changed)
++        let _ = seen;
++        staged.replace(&target).map(|()| Saved::Written)
+     }
+ 
+     pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<Removed> {

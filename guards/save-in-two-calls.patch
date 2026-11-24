@@ -1,0 +1,35 @@
+Mistake: a save looked at the file, then replaced it in another system call, and wrote over what came in between
+Run: verify/check --drift
+Says: src/store.rs: save changed
+Run: cargo test --locked --quiet in_the_middle_of_a_save
+Says: a_change_that_lands_in_the_middle_of_a_save_is_kept_beside_the_typed_text --- FAILED
+
+diff --git i/src/store.rs w/src/store.rs
+--- i/src/store.rs
++++ w/src/store.rs
+@@ -144,23 +144,8 @@
+             _ => {}
+         }
+         gap();
+-        let Some(taken) = staged.put(&target)? else {
+-            return Ok(Saved::Written);
+-        };
+-        let Some(unseen) = taken.drop_if_seen(&seen)? else {
+-            return Ok(Saved::Written);
+-        };
+-        gap();
+-        let back = swap(&unseen.0, &target);
+-        gap();
+-        let left = match back {
+-            Ok(()) => unseen.drop_if_seen(&seen)?,
+-            Err(_) => Some(unseen),
+-        };
+-        if let Some(left) = left {
+-            left.keep(&self.dir, id)?;
+-        }
+-        Ok(Saved::Changed)
++        let _ = seen;
++        staged.replace(&target).map(|()| Saved::Written)
+     }
+ 
+     pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<Removed> {

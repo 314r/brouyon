@@ -117,10 +117,7 @@ impl Store {
 
     pub fn create(&self, text: &str) -> io::Result<NoteId> {
         let stem = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
-        let temp = write_temp(&self.dir, &stem, text)?;
-        move_to_free_name(&temp, &self.dir, &stem).inspect_err(|_| {
-            let _ = fs::remove_file(&temp);
-        })
+        Staged::write(&self.dir, &stem, text)?.into_note(&self.dir, &stem)
     }
 
     /// Atomically replaces a note's contents with `text`, unless its file holds
@@ -130,29 +127,44 @@ impl Store {
     /// A note deleted elsewhere is written again, because an edit is worth more
     /// than a deletion. One that already holds `text` is left as it is, date
     /// included.
+    ///
+    /// The look comes first so that a file that changed is left untouched. What
+    /// decides is the second look, at the file the swap took out: nothing else
+    /// can write there.
     pub fn save(&self, id: &str, loaded: &str, text: &str) -> io::Result<Saved> {
-        let mut already_there = false;
-        let written = write_if(&self.dir, id, text, || {
-            match fs::read(self.dir.join(id)) {
-                Ok(held) if held == text.as_bytes() => {
-                    already_there = true;
-                    Ok(false)
-                }
-                // Bytes, so a file that is no longer text counts as changed.
-                Ok(held) => Ok(held == loaded.as_bytes()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-                Err(error) => Err(error),
-            }
-        })?;
-        Ok(if written || already_there {
-            Saved::Written
-        } else {
-            Saved::Changed
-        })
+        let target = self.dir.join(id);
+        let seen = [loaded, text];
+        keep_stale(&self.dir, id)?;
+        let staged = Staged::write(&self.dir, id, text)?;
+        match fs::read(&target) {
+            Ok(held) if held == text.as_bytes() => return Ok(Saved::Written),
+            // Bytes, so a file that is no longer text counts as changed.
+            Ok(held) if held != loaded.as_bytes() => return Ok(Saved::Changed),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        gap();
+        let Some(taken) = staged.put(&target)? else {
+            return Ok(Saved::Written);
+        };
+        let Some(unseen) = taken.drop_if_seen(&seen)? else {
+            return Ok(Saved::Written);
+        };
+        gap();
+        let back = swap(&unseen.0, &target);
+        gap();
+        let left = match back {
+            Ok(()) => unseen.drop_if_seen(&seen)?,
+            Err(_) => Some(unseen),
+        };
+        if let Some(left) = left {
+            left.keep(&self.dir, id)?;
+        }
+        Ok(Saved::Changed)
     }
 
     pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<Removed> {
-        remove_if_holds(&self.dir.join(id), loaded)
+        remove_if_holds(&self.dir, id, loaded)
     }
 
     pub fn trash(&self, id: &str) -> io::Result<NoteId> {
@@ -164,7 +176,7 @@ impl Store {
     }
 
     pub fn purge(&self, id: &str, shown: &str) -> io::Result<Removed> {
-        remove_if_holds(&self.trash.join(id), shown)
+        remove_if_holds(&self.trash, id, shown)
     }
 
     pub fn empty_trash(&self) -> io::Result<()> {
@@ -175,12 +187,23 @@ impl Store {
     }
 }
 
-fn remove_if_holds(path: &Path, text: &str) -> io::Result<Removed> {
-    match fs::read(path) {
-        Ok(held) if held != text.as_bytes() => Ok(Removed::Changed),
-        Ok(_) => gone(fs::remove_file(path)).map(|()| Removed::Gone),
-        Err(error) => gone(Err(error)).map(|()| Removed::Gone),
+/// The look comes first so that a file that changed is left untouched. What decides
+/// is the second look, at the file once it is out of the folder.
+fn remove_if_holds(dir: &Path, name: &str, text: &str) -> io::Result<Removed> {
+    match fs::read(dir.join(name)) {
+        Ok(held) if held != text.as_bytes() => return Ok(Removed::Changed),
+        Ok(_) => {}
+        Err(error) => return gone(Err(error)).map(|()| Removed::Gone),
     }
+    gap();
+    let Some(taken) = Taken::take(dir, name)? else {
+        return Ok(Removed::Gone);
+    };
+    let Some(unseen) = taken.drop_if_seen(&[text])? else {
+        return Ok(Removed::Gone);
+    };
+    gap();
+    unseen.keep(dir, name).map(|_| Removed::Changed)
 }
 
 fn gone(removed: io::Result<()>) -> io::Result<()> {
@@ -190,53 +213,156 @@ fn gone(removed: io::Result<()>) -> io::Result<()> {
     }
 }
 
+/// For a file that only this app writes, such as its settings.
 pub fn write_atomically(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    write_if(dir, name, text, || Ok(true)).map(|_| ())
+    let _ = fs::remove_file(dir.join(temp_name(name)));
+    Staged::write(dir, name, text)?.replace(&dir.join(name))
 }
 
-/// The temporary file's name starts with `.~`, which Dropbox never syncs, and with
-/// a dot, which keeps it out of the list of notes.
-fn write_if(
-    dir: &Path,
-    name: &str,
-    text: &str,
-    may_replace: impl FnOnce() -> io::Result<bool>,
-) -> io::Result<bool> {
-    let temp = write_temp(dir, name, text)?;
-    let result = may_replace().and_then(|may| {
-        if may {
-            replace(&temp, &dir.join(name))?;
-        }
-        Ok(may)
-    });
-    if !matches!(result, Ok(true)) {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
+/// This app's own text under a temporary name, which goes with it unless it is
+/// moved first. The name starts with `.~`, which Dropbox never syncs, and with a
+/// dot, which keeps it out of the list of notes.
+struct Staged(PathBuf);
 
-fn write_temp(dir: &Path, name: &str, text: &str) -> io::Result<PathBuf> {
-    let temp = dir.join(temp_name(name));
-    let written = (|| {
-        let mut file = File::create(&temp)?;
+impl Staged {
+    /// Never writes into a file that is already there: it may be a `Taken` that a
+    /// failed system call left behind.
+    fn write(dir: &Path, name: &str, text: &str) -> io::Result<Self> {
+        let path = dir.join(temp_name(name));
+        let mut file = File::create_new(&path)?;
+        let staged = Self(path);
         file.write_all(text.as_bytes())?;
-        file.sync_all()
-    })();
-    match written {
-        Ok(()) => Ok(temp),
-        Err(error) => {
-            let _ = fs::remove_file(&temp);
-            Err(error)
+        file.sync_all()?;
+        Ok(staged)
+    }
+
+    fn moved(mut self) {
+        self.0 = PathBuf::new();
+    }
+
+    /// Takes `target`'s place in one system call, and gives the file that was there.
+    fn put(self, target: &Path) -> io::Result<Option<Taken>> {
+        use rustix::io::Errno;
+        match swap(&self.0, target) {
+            Ok(()) => {
+                let taken = Taken(self.0.clone());
+                self.moved();
+                Ok(Some(taken))
+            }
+            Err(Errno::NOENT) => {
+                gap();
+                move_new(&self.0, target)?;
+                self.moved();
+                Ok(None)
+            }
+            Err(Errno::INVAL | Errno::NOSYS | Errno::NOTSUP) => self.replace(target).map(|()| None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// For the settings, and for a folder whose file system can't swap two files.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the settings have one writer, and this file system has no swap"
+    )]
+    fn replace(self, target: &Path) -> io::Result<()> {
+        fs::rename(&self.0, target)?;
+        self.moved();
+        Ok(())
+    }
+
+    fn into_note(self, dir: &Path, stem: &str) -> io::Result<NoteId> {
+        let id = move_to_free_name(&self.0, dir, stem)?;
+        self.moved();
+        Ok(id)
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.0.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.0);
         }
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a save replaces the file it compared"
-)]
-fn replace(temp: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(temp, target)
+/// A note's file, moved to its temporary name in one system call. Nothing else
+/// writes there, so what it holds can be read before it goes. Only
+/// `drop_if_seen` deletes it.
+#[must_use]
+struct Taken(PathBuf);
+
+impl Taken {
+    fn take(dir: &Path, name: &str) -> io::Result<Option<Self>> {
+        keep_stale(dir, name)?;
+        let temp = dir.join(temp_name(name));
+        match move_new(&dir.join(name), &temp) {
+            Ok(()) => Ok(Some(Self(temp))),
+            Err(error) => gone(Err(error)).map(|()| None),
+        }
+    }
+
+    /// Deletes the file if it holds one of the texts the user has seen, and gives
+    /// it back if it holds anything else, or can't be read.
+    fn drop_if_seen(self, seen: &[&str]) -> io::Result<Option<Self>> {
+        let held = fs::read(&self.0);
+        if held.is_ok_and(|held| seen.iter().any(|text| held == text.as_bytes())) {
+            fs::remove_file(&self.0).map(|()| None)
+        } else {
+            Ok(Some(self))
+        }
+    }
+
+    /// Back under its own name if nothing has it by now, or under the next one.
+    fn keep(self, dir: &Path, name: &str) -> io::Result<NoteId> {
+        move_to_free_name(&self.0, dir, stem_of(name))
+    }
+}
+
+/// A `Taken` that a failed system call left under its temporary name becomes a
+/// note again before that name is used.
+fn keep_stale(dir: &Path, name: &str) -> io::Result<()> {
+    gone(move_to_free_name(&dir.join(temp_name(name)), dir, stem_of(name)).map(drop))
+}
+
+fn swap(one: &Path, other: &Path) -> rustix::io::Result<()> {
+    use rustix::fs;
+    fs::renameat_with(fs::CWD, one, fs::CWD, other, fs::RenameFlags::EXCHANGE)
+}
+
+#[cfg(test)]
+thread_local! {
+    static MEANWHILE: std::cell::RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Between two system calls, where another program can act. A test makes it act
+/// with `testing::at_gap`.
+fn gap() {
+    #[cfg(test)]
+    if let Some(act) = MEANWHILE.with(|acts| acts.borrow_mut().pop_front()) {
+        act();
+    }
+}
+
+#[cfg(test)]
+pub mod testing {
+    use super::MEANWHILE;
+
+    /// Plays another program in the `nth` gap this thread's store reaches from now.
+    pub fn at_gap(nth: usize, act: impl FnOnce() + 'static) {
+        MEANWHILE.with(|acts| {
+            let mut acts = acts.borrow_mut();
+            while acts.len() + 1 < nth {
+                acts.push_back(Box::new(|| {}));
+            }
+            acts.push_back(Box::new(act));
+        });
+    }
+
+    pub fn every_gap_was_reached() -> bool {
+        MEANWHILE.with(|acts| acts.borrow().is_empty())
+    }
 }
 
 fn move_new(from: &Path, to: &Path) -> io::Result<()> {
@@ -363,7 +489,10 @@ fn unwrapped(s: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        testing::{at_gap, every_gap_was_reached},
+        *,
+    };
     use crate::watch::testing::QUIET;
     use std::{
         os::unix::fs::{MetadataExt, PermissionsExt},
@@ -592,6 +721,157 @@ mod tests {
             Removed::Gone,
             "one already gone is as gone as was asked"
         );
+    }
+
+    fn they_write(path: PathBuf, text: &'static str) -> impl FnOnce() + 'static {
+        move || fs::write(path, text).unwrap()
+    }
+
+    fn texts(dir: &Path) -> Vec<String> {
+        let mut texts: Vec<_> = files(dir)
+            .iter()
+            .map(|name| fs::read_to_string(dir.join(name)).unwrap())
+            .collect();
+        texts.sort();
+        texts
+    }
+
+    #[test]
+    fn a_file_that_changes_between_the_look_and_the_save_is_put_back() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        at_gap(1, they_write(dir.path().join(&id), "theirs"));
+
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Changed
+        );
+        assert!(every_gap_was_reached());
+        assert_eq!(store.read(&id).unwrap(), "theirs");
+        assert_eq!(files(dir.path()), [id]);
+    }
+
+    #[test]
+    fn a_file_that_changes_again_while_it_is_put_back_is_kept_too() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        at_gap(1, they_write(dir.path().join(&id), "theirs"));
+        at_gap(2, they_write(dir.path().join(&id), "theirs again"));
+
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Changed
+        );
+        assert!(every_gap_was_reached());
+        assert_eq!(store.read(&id).unwrap(), "theirs");
+        assert_eq!(texts(dir.path()), ["theirs", "theirs again"]);
+    }
+
+    #[test]
+    fn a_file_deleted_between_the_look_and_the_save_is_written_again() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        let path = dir.path().join(&id);
+        at_gap(1, move || fs::remove_file(path).unwrap());
+
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Written
+        );
+        assert!(every_gap_was_reached());
+        assert_eq!(texts(dir.path()), ["typed here"]);
+    }
+
+    #[test]
+    fn a_file_that_comes_back_during_the_save_is_never_replaced() {
+        for gap in [1, 2] {
+            let (dir, store) = store();
+            let id = store.create("as loaded").unwrap();
+            fs::remove_file(dir.path().join(&id)).unwrap();
+            at_gap(gap, they_write(dir.path().join(&id), "theirs"));
+
+            let saved = store.save(&id, "as loaded", "typed here");
+            assert!(every_gap_was_reached());
+            assert_ne!(saved.ok(), Some(Saved::Written), "in gap {gap}");
+            assert_eq!(store.read(&id).unwrap(), "theirs");
+            assert_eq!(files(dir.path()), [id]);
+        }
+    }
+
+    #[test]
+    fn a_file_that_changes_between_the_look_and_the_removal_is_put_back() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        at_gap(1, they_write(dir.path().join(&id), "theirs"));
+
+        assert_eq!(
+            store.remove_unchanged(&id, "as loaded").unwrap(),
+            Removed::Changed
+        );
+        assert!(every_gap_was_reached());
+        assert_eq!(store.read(&id).unwrap(), "theirs");
+        assert_eq!(files(dir.path()), [id]);
+    }
+
+    #[test]
+    fn a_file_put_back_never_replaces_one_that_took_its_name() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        at_gap(1, they_write(dir.path().join(&id), "theirs"));
+        at_gap(2, they_write(dir.path().join(&id), "newer"));
+
+        assert_eq!(
+            store.remove_unchanged(&id, "as loaded").unwrap(),
+            Removed::Changed
+        );
+        assert!(every_gap_was_reached());
+        assert_eq!(store.read(&id).unwrap(), "newer");
+        assert_eq!(texts(dir.path()), ["newer", "theirs"]);
+    }
+
+    #[test]
+    fn a_trashed_note_that_changes_between_the_look_and_the_purge_is_put_back() {
+        let (dir, store) = store();
+        let path = dir.path().join(".trash/one.md");
+        fs::write(&path, "shown").unwrap();
+        at_gap(1, they_write(path, "theirs"));
+
+        assert_eq!(store.purge("one.md", "shown").unwrap(), Removed::Changed);
+        assert!(every_gap_was_reached());
+        assert_eq!(store.read_trashed("one.md").unwrap(), "theirs");
+        assert_eq!(files(&dir.path().join(".trash")), ["one.md"]);
+    }
+
+    #[test]
+    fn a_file_left_under_the_temporary_name_becomes_a_note_before_the_name_is_used() {
+        let (dir, store) = store();
+        let id = store.create("as loaded").unwrap();
+        let left = dir.path().join(temp_name(&id));
+
+        fs::write(&left, "left by a save").unwrap();
+        assert_eq!(
+            store.save(&id, "as loaded", "typed here").unwrap(),
+            Saved::Written
+        );
+        assert_eq!(texts(dir.path()), ["left by a save", "typed here"]);
+
+        fs::write(&left, "left by a removal").unwrap();
+        assert_eq!(
+            store.remove_unchanged(&id, "typed here").unwrap(),
+            Removed::Gone
+        );
+        assert_eq!(texts(dir.path()), ["left by a removal", "left by a save"]);
+    }
+
+    #[test]
+    fn this_file_system_can_swap_two_files() {
+        let (dir, _store) = store();
+        let (one, other) = (dir.path().join("one"), dir.path().join("other"));
+        fs::write(&one, "one").unwrap();
+        fs::write(&other, "other").unwrap();
+        assert_eq!(swap(&one, &other), Ok(()));
+        assert_eq!(fs::read_to_string(&one).unwrap(), "other");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "one");
     }
 
     #[test]

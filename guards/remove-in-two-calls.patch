@@ -1,0 +1,27 @@
+Mistake: emptying a note and Delete forever looked at the file, then deleted it in another system call, with what came in between
+Run: verify/check --drift
+Says: src/store.rs: remove_if_holds changed
+Run: cargo test --locked --quiet in_the_middle_of_a_removal
+Says: a_change_that_lands_in_the_middle_of_a_removal_keeps_the_file --- FAILED
+Run: cargo test --locked --quiet in_the_middle_of_delete_forever
+Says: a_change_that_lands_in_the_middle_of_delete_forever_keeps_the_note --- FAILED
+
+diff --git i/src/store.rs w/src/store.rs
+--- i/src/store.rs
++++ w/src/store.rs
+@@ -196,14 +196,7 @@
+         Err(error) => return gone(Err(error)).map(|()| Removed::Gone),
+     }
+     gap();
+-    let Some(taken) = Taken::take(dir, name)? else {
+-        return Ok(Removed::Gone);
+-    };
+-    let Some(unseen) = taken.drop_if_seen(&[text])? else {
+-        return Ok(Removed::Gone);
+-    };
+-    gap();
+-    unseen.keep(dir, name).map(|_| Removed::Changed)
++    gone(fs::remove_file(dir.join(name))).map(|()| Removed::Gone)
+ }
+ 
+ fn gone(removed: io::Result<()>) -> io::Result<()> {

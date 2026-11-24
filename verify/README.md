@@ -10,14 +10,13 @@ A test runs one order of events. `NothingLost.tla` describes `flush`, `refresh_o
 verify/check
 ```
 
-It takes about a minute on 16 cores and needs `mise`, which fetches the Java it pins. The first run downloads TLC 1.7.4 into `target/verify/` and checks its hash. It reads no notes and opens no window. CI runs it.
+It takes about a minute and a half on 16 cores and needs `mise`, which fetches the Java it pins. The first run downloads TLC 1.7.4 into `target/verify/` and checks its hash. It reads no notes and opens no window. CI runs it.
 
 | Line | What it says |
 |---|---|
-| `ok promise` | With the finding set aside, every rule holds in every state within the bounds. |
-| `KNOWN finding-…` | The finding below is still in the code, and breaks only the rules recorded for it. |
+| `ok promise` | Every rule holds in every state within the bounds. |
 | `ok mistake-…` | A mistake was caught. Where a commit is named, the mistake was in the code before it. |
-| `WRONG …` | A rule broke, a finding went away, or a mistake got through. |
+| `WRONG …` | A rule broke, or a mistake got through. |
 | `DRIFT …` | The covered code changed since the model was confirmed to describe it. |
 
 It exits with 0 when all is as recorded, 1 for `WRONG`, and 2 for `DRIFT` alone. `verify/check --trace CASE RULE` tells a counterexample in the code's words.
@@ -27,7 +26,7 @@ It exits with 0 when all is as recorded, 1 for `WRONG`, and 2 for `DRIFT` alone.
 `verify/check --drift` names each covered function that changed, and each new one that handles notes' text. For each of them:
 
 1. Read its diff against the action the table below gives for it.
-2. Make the model do what the code now does. A step is one system call. A call that writes between a check and its act belongs in `Gap`.
+2. Make the model do what the code now does. A step is one system call, with the reads of a file that nothing else can reach. The other program acts between any two steps.
 3. Add a `Broken` mistake, a case in `check`, and a rule for any new way to lose text.
 4. Run `verify/check`. A rule that breaks is a bug in the code until a replay shows otherwise: see below. Don't weaken the rule.
 5. Run `verify/check --confirm` and commit the table with the code. It takes the code as it is, so it proves nothing without the steps above.
@@ -49,25 +48,18 @@ Replay the steps on the real code, in a test in `src/app.rs`, one line for each 
 | `Quit` | `cx.simulate_close()` |
 | `FlushFails` | `fs::remove_dir_all(dir.path())` before the save |
 | `TheyWrite`, `TheyDelete`, and in the trash | `fs::write`, `fs::remove_file` |
+| The same, between two system calls of `Store` | `at_gap(2, move \|\| …)`, for the second `gap()` it reaches |
 | `Sync` | `notice_changes(&view, cx)` |
-
-`replays.patch` holds the replays of the finding. `race.c` plays the other program between two system calls, on Linux:
-
-```sh
-git apply verify/replays.patch
-mkdir -p target/verify && gcc -shared -fPIC -o target/verify/race.so verify/race.c -ldl
-LD_PRELOAD="$PWD/target/verify/race.so" cargo test replay_ -- --test-threads=1
-git apply -R verify/replays.patch
-```
 
 ## Findings
 
-**A check and its act are two system calls** (`finding-gap`; SaveKeepsTheirs, RemoveKeepsTheirs, PurgeKeepsTheirs). It is open, and was replayed on the real code. Another program that writes between the two is overwritten or deleted. It takes the same shape in `Store::save`, `remove_unchanged` and `purge`.
-1. `Store::save` reads the file. It holds what was loaded.
-2. Another program replaces the file.
-3. `Store::save` renames its temporary file over it, and returns `Written`.
+None is open.
 
-The moment is microseconds wide. `create`, `trash` and `restore` don't have it: `move_new` looks and moves in one system call.
+**A look and its act were two system calls** (fixed; `mistake-save-in-two-calls`, `mistake-remove-in-two-calls`, `mistake-purge-in-two-calls`). Another program that wrote between the two was overwritten or deleted, in `Store::save`, `remove_unchanged` and `purge`. Now the act comes first and takes nothing away, and the look that decides comes after it:
+- `Store::save` swaps its temporary file with the note's in one system call, then reads what came out. If the user hasn't seen it, the same swap puts it back.
+- `remove_unchanged` and `purge` move the file to its temporary name in one system call, then read it there. If the user hasn't seen it, it goes back under a name nothing has.
+
+The first look is still there. It leaves a file that changed untouched, which is the usual case.
 
 ## What it covers
 
@@ -77,9 +69,9 @@ It assumes that:
 - Brouyon is the only Brouyon on the folder on this computer. Two would share the temporary file that `temp_name` names.
 - The other program replaces whole files at once, as Dropbox does. A file written in place, and read half-written, is left out.
 - Handlers run one at a time on the main thread.
-- The file system can refuse to replace a file. Where it can't, such as on NFS, `move_new_in_two` looks and moves in two calls.
+- The file system can refuse to replace a file, and can swap two. Where it can't, such as on NFS, `move_new_in_two` and `Staged::replace` look and act in two calls.
 
-It leaves out: several notes folders (`set_notes_dir` counts as leaving a note), Empty Trash, which asks for every note to go, seen or not, files that aren't UTF-8, text that is only white space, dates, the list, power loss, a kill before the save timer, and what Dropbox does with two versions. After a save that failed, and said so, quitting may drop the text: `may_leave` means it to.
+It leaves out: several notes folders (`set_notes_dir` counts as leaving a note), Empty Trash, which asks for every note to go, seen or not, files that aren't UTF-8, text that is only white space, dates, the list, power loss, a kill before the save timer, and what Dropbox does with two versions. It also stops following a file that changed and couldn't be put back, because that system call failed too. The file stays under its temporary name, the save says it failed, and `keep_stale` makes it a note before anything writes to that name. After a save that failed, and said so, quitting may drop the text: `may_leave` means it to.
 
 A pass is about this model within these bounds, not the whole app. The table is what ties it to the code.
 
@@ -87,22 +79,30 @@ A pass is about this model within these bounds, not the whole app. The table is 
 
 | File | Function | In the model | Confirmed |
 |---|---|---|---|
-| `src/store.rs` | `save` | SaveRead, SaveRename | `bd105301ad82` |
-| `src/store.rs` | `remove_unchanged` | RemoveRead, RemoveUnlink | `fa757478bd8b` |
-| `src/store.rs` | `create` | CreateMove | `7b75029f0095` |
+| `src/store.rs` | `save` | SaveRead, SavePut, SaveMove, SaveBack, SaveKeep | `270daa70e47e` |
+| `src/store.rs` | `remove_unchanged` | RemoveRead, RemoveTake, RemoveKeep | `d0c8afa8d446` |
+| `src/store.rs` | `create` | CreateMove | `59a1f75500ec` |
 | `src/store.rs` | `trash` | TrashMove | `34c47a7e06a4` |
 | `src/store.rs` | `restore` | Restore | `997d7de4b075` |
-| `src/store.rs` | `purge` | Confirm, PurgeUnlink | `ec6db3b637aa` |
-| `src/store.rs` | `remove_if_holds` | RemoveRead, RemoveUnlink, Confirm, PurgeUnlink | `1dbdd4a8fefc` |
-| `src/store.rs` | `gone` | RemoveRead, RemoveUnlink, PurgeUnlink | `f2b029774ab1` |
-| `src/store.rs` | `write_temp` | SaveRead, CreateMove | `43e4dce64dd1` |
-| `src/store.rs` | `replace` | SaveRename | `ccd4b6f3c93b` |
+| `src/store.rs` | `purge` | Confirm, PurgeTake, PurgeKeep | `881cfd35ae7b` |
+| `src/store.rs` | `remove_if_holds` | RemoveRead, RemoveTake, RemoveKeep, Confirm, PurgeTake, PurgeKeep | `cb2fed549846` |
+| `src/store.rs` | `gone` | RemoveRead, RemoveTake, PurgeTake | `f2b029774ab1` |
+| `src/store.rs` | `write` | SaveRead, CreateMove: the text is in a temporary file before the first step, and never over a file that is there | `5cfc544a59e7` |
+| `src/store.rs` | `put` | SavePut, SaveMove | `ff27658534db` |
+| `src/store.rs` | `into_note` | CreateMove | `47000c45ae96` |
+| `src/store.rs` | `drop` | FlushFails: a temporary file that wasn't moved goes | `078952d49c2f` |
+| `src/store.rs` | `take` | RemoveTake, PurgeTake | `629613436b3a` |
+| `src/store.rs` | `drop_if_seen` | SavePut, SaveBack, RemoveTake, PurgeTake | `1c9e6b354587` |
+| `src/store.rs` | `keep` | SaveKeep, RemoveKeep, PurgeKeep | `559b6347bfc6` |
+| `src/store.rs` | `keep_stale` | The assumption that a file left under a temporary name is never written over | `eedda3c25689` |
+| `src/store.rs` | `swap` | SavePut, SaveBack | `983856e53c53` |
+| `src/store.rs` | `gap` | TheyMayAct: where the other program acts, between two steps | `574af4729fe8` |
+| `src/store.rs` | `replace` | Left out: the settings, and the assumption about the file system | `a8cfe4e7d8c5` |
 | `src/store.rs` | `move_to_free_name` | FreeNames | `76ad09b436f2` |
-| `src/store.rs` | `move_new` | CreateMove, TrashMove, Restore | `d050286bc60f` |
+| `src/store.rs` | `move_new` | CreateMove, TrashMove, Restore, SaveMove, RemoveTake, PurgeTake | `d050286bc60f` |
 | `src/store.rs` | `move_new_in_two` | Left out: the assumption about the file system | `097c8f1da99a` |
 | `src/store.rs` | `empty_trash` | Left out: it asks for every note to go, seen or not | `d99e3e7b6230` |
-| `src/store.rs` | `write_if` | The order of SaveRead and SaveRename, and FlushFails | `2eb83e1dfa8c` |
-| `src/store.rs` | `write_atomically` | Left out: it writes the settings | `3830974b9ee8` |
+| `src/store.rs` | `write_atomically` | Left out: it writes the settings | `03f8e04703fe` |
 | `src/store.rs` | `temp_name` | The assumption that nothing else uses the temporary file | `2a307189254f` |
 | `src/app.rs` | `follow_editor` | Type, Compose: which changes are looked at | `df636c56308d` |
 | `src/app.rs` | `on_editor_notify` | Type, Compose, SaveTimer | `16f29149f73c` |
@@ -144,7 +144,7 @@ A pass is about this model within these bounds, not the whole app. The table is 
 | `src/app.rs` | `restore` | Restore | `79882eef2106` |
 | `src/app.rs` | `ask_to_delete_forever` | Ask | `b669c2862166` |
 | `src/app.rs` | `ask` | Ask | `74ad53d8fabf` |
-| `src/app.rs` | `answer` | Cancel, Confirm, PurgeUnlink | `fec7149f72c2` |
+| `src/app.rs` | `answer` | Cancel, Confirm, PurgeTake, PurgeKeep | `fec7149f72c2` |
 | `src/app.rs` | `set_notes_dir` | Select, as leaving a note for a blank one | `d99638780c0e` |
 | `src/app.rs` | `new` | Init, and the hooks that call `flush` and `on_close` | `7ed04ac8791b` |
 | `src/app.rs` | `init` | Left out: it quits only when no window is open | `a8f178eebb98` |

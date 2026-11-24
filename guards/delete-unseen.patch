@@ -5,14 +5,13 @@ Run: cargo test --locked --quiet delete_forever_leaves
 Says: delete_forever_leaves_a_note_that_changed_since_it_was_shown --- FAILED
 
 diff --git i/src/store.rs w/src/store.rs
-index 19b6fe2..eae54db 100644
 --- i/src/store.rs
 +++ w/src/store.rs
-@@ -164,7 +164,8 @@ impl Store {
+@@ -176,7 +176,8 @@
      }
  
      pub fn purge(&self, id: &str, shown: &str) -> io::Result<Removed> {
--        remove_if_holds(&self.trash.join(id), shown)
+-        remove_if_holds(&self.trash, id, shown)
 +        let _ = shown;
 +        gone(fs::remove_file(self.trash.join(id))).map(|()| Removed::Gone)
      }

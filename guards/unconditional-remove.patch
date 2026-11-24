@@ -5,14 +5,13 @@ Run: cargo test --locked --quiet emptying_a_note_changed_elsewhere
 Says: emptying_a_note_changed_elsewhere_keeps_the_file --- FAILED
 
 diff --git i/src/store.rs w/src/store.rs
-index 19b6fe2..55183e3 100644
 --- i/src/store.rs
 +++ w/src/store.rs
-@@ -152,7 +152,8 @@ impl Store {
+@@ -164,7 +164,8 @@
      }
  
      pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<Removed> {
--        remove_if_holds(&self.dir.join(id), loaded)
+-        remove_if_holds(&self.dir, id, loaded)
 +        let _ = loaded;
 +        gone(fs::remove_file(self.dir.join(id))).map(|()| Removed::Gone)
      }
