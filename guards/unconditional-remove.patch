@@ -1,0 +1,19 @@
+Mistake: before a1a7ee2, emptying a note deleted what was written elsewhere
+Run: verify/check --drift
+Says: remove_unchanged changed
+Run: cargo test --locked --quiet emptying_a_note_changed_elsewhere
+Says: emptying_a_note_changed_elsewhere_keeps_the_file --- FAILED
+
+diff --git i/src/store.rs w/src/store.rs
+index 7e815aa..c177d27 100644
+--- i/src/store.rs
++++ w/src/store.rs
+@@ -175,7 +175,7 @@ impl Store {
+             _ => Ok(true),
+         };
+         match fs::read(&path) {
+-            Ok(held) if held == loaded.as_bytes() => gone(fs::remove_file(&path)),
++            Ok(_) if !loaded.is_empty() => gone(fs::remove_file(&path)),
+             Ok(_) => Ok(false),
+             Err(error) => gone(Err(error)),
+         }

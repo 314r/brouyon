@@ -4,7 +4,8 @@
     tools/prove-guards           every mistake
     tools/prove-guards NAME...   only these, such as guards/false-credit.patch
 
-A file in guards/ starts with three lines, then has the patch that brings the mistake back:
+A file in guards/ starts with these lines, then has the patch that brings the mistake back.
+Run and Says come again for each other guard that has to catch it:
 
     Mistake: where it happened and what it did
     Run: the command that has to fail
@@ -48,11 +49,11 @@ def copy_tree():
 
 def read_guard(path):
     head, _, patch = path.read_text().partition("\n\n")
-    fields = dict(re.findall(r"^(\w+): (.+)$", head, re.M))
-    missing = {"Mistake", "Run", "Says"} - set(fields)
-    if missing:
-        sys.exit(f"{path}: no {', '.join(sorted(missing))}")
-    return fields["Mistake"], fields["Run"], fields["Says"], patch
+    mistake = re.findall(r"^Mistake: (.+)$", head, re.M)
+    checks = re.findall(r"^Run: (.+)\nSays: (.+)$", head, re.M)
+    if len(mistake) != 1 or not checks:
+        sys.exit(f"{path}: needs a Mistake line, then Run and Says lines in pairs")
+    return mistake[0], checks, patch
 
 
 def run(command):
@@ -71,12 +72,12 @@ def main():
     copy_tree()
     broken = []
     # A command that fails without the mistake would prove nothing by failing with it.
-    for command in sorted({command for _, command, _, _ in guards.values()}):
+    for command in sorted({command for _, checks, _ in guards.values() for command, _ in checks}):
         status, output = run(command)
         if status:
             print(f"BROKEN without any mistake, this already fails: {command}\n{output[-2000:]}")
             return 1
-    for name, (mistake, command, says, patch) in guards.items():
+    for name, (mistake, checks, patch) in guards.items():
         started = time.monotonic()
         try:
             apply(patch)
@@ -86,15 +87,17 @@ def main():
                   "today's code, and keep it as the patch")
             continue
         try:
-            status, output = run(command)
+            results = [(command, says, *run(command)) for command, says in checks]
         finally:
             apply(patch, "-R")
-        if status and says in output:
-            print(f"caught {name} in {time.monotonic() - started:.0f} s: {mistake}")
-        else:
-            broken.append(name)
-            why = "failed for another reason" if status else "passed"
+        missed = [result for result in results if not result[2] or result[1] not in result[3]]
+        for command, says, status, output in missed:
+            why = f"failed without saying \"{says}\"" if status else "passed"
             print(f"BROKEN {name}: `{command}` {why} with the mistake back\n{output[-2000:]}")
+        if missed:
+            broken.append(name)
+        else:
+            print(f"caught {name} in {time.monotonic() - started:.0f} s: {mistake}")
     print(f"{'FAIL' if broken else 'PASS'} tools/prove-guards: {len(guards) - len(broken)} of {len(guards)} caught")
     return 1 if broken else 0
 
