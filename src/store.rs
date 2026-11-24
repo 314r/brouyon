@@ -1,6 +1,3 @@
-//! Notes as plain files. Each note is one UTF-8 `.md` file in a single folder,
-//! trashed notes move to its `.trash` subfolder, and no other metadata exists.
-
 use crate::checked::NotesDir;
 use std::{
     ffi::OsStr,
@@ -13,24 +10,17 @@ use std::{
 
 const TRASH_DIR: &str = ".trash";
 const EXTENSION: &str = "md";
-/// What the name of a file being saved starts with. Nothing else in the folder
-/// does, so whatever watches it can tell a save in progress from a change.
 pub const TEMP_PREFIX: &str = ".~";
-/// More than any list is wide, and a long line costs nothing to keep out of it.
 const PREVIEW_CHARS: usize = 200;
 
-/// A note's file name, such as `2026-11-06 09-42-15.md`. Set at creation and never
-/// changed, so editing the title does not rename the file.
 pub type NoteId = String;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
     pub id: NoteId,
     pub title: String,
-    /// The line under the title in the list. Empty for a note of one line.
     pub preview: String,
     pub modified: SystemTime,
-    /// Kept so that finding a note doesn't read every file again at each key.
     text: String,
 }
 
@@ -45,8 +35,6 @@ impl Note {
         }
     }
 
-    /// Whether the note holds every one of `terms`, which [`terms`] made. Their
-    /// order and place don't matter, and no terms at all match every note.
     pub fn matches(&self, terms: &[String]) -> bool {
         if terms.is_empty() {
             return true;
@@ -55,8 +43,6 @@ impl Note {
         terms.iter().all(|term| text.contains(term.as_str()))
     }
 
-    /// The first line under the title holding one of `terms`, to show why the note
-    /// was found. `None` when only the title does.
     pub fn found_line(&self, terms: &[String]) -> Option<String> {
         if terms.is_empty() {
             return None;
@@ -71,7 +57,6 @@ impl Note {
     }
 }
 
-/// The words to look for in notes: those of `query`, whatever their case.
 pub fn terms(query: &str) -> Vec<String> {
     query
         .to_lowercase()
@@ -80,12 +65,9 @@ pub fn terms(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// What became of a save that must not undo a change made elsewhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Saved {
-    /// The file holds the text.
     Written,
-    /// The file changed since it was read, and was left as it is.
     Changed,
 }
 
@@ -102,17 +84,14 @@ impl Store {
         Ok(Self { dir, trash })
     }
 
-    /// The folders to watch for changes: the notes' and the trash's.
     pub fn folders(&self) -> Vec<PathBuf> {
         vec![self.dir.clone(), self.trash.clone()]
     }
 
-    /// Notes, most recently modified first.
     pub fn list(&self) -> io::Result<Vec<Note>> {
         scan(&self.dir)
     }
 
-    /// Trashed notes, most recently modified first.
     pub fn list_trash(&self) -> io::Result<Vec<Note>> {
         scan(&self.trash)
     }
@@ -129,7 +108,6 @@ impl Store {
         fs::metadata(self.dir.join(id))?.modified()
     }
 
-    /// Creates a new note file holding `text` and returns its id.
     pub fn create(&self, text: &str) -> io::Result<NoteId> {
         let stem = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
         let temp = write_temp(&self.dir, &stem, text)?;
@@ -166,9 +144,6 @@ impl Store {
         })
     }
 
-    /// Deletes the file of a note that has become empty, which has nothing worth
-    /// keeping in the trash. Returns false, leaving the file, if it holds something
-    /// other than `loaded`: what was written elsewhere wasn't emptied here.
     pub fn remove_unchanged(&self, id: &str, loaded: &str) -> io::Result<bool> {
         remove_if_holds(&self.dir.join(id), loaded)
     }
@@ -181,13 +156,10 @@ impl Store {
         move_to_free_name(&self.trash.join(id), &self.dir, stem_of(id))
     }
 
-    /// Permanently deletes one trashed note. Returns false, leaving the file, if it
-    /// holds something other than `shown`: nobody asked for that to go.
     pub fn purge(&self, id: &str, shown: &str) -> io::Result<bool> {
         remove_if_holds(&self.trash.join(id), shown)
     }
 
-    /// Permanently deletes every trashed note.
     pub fn empty_trash(&self) -> io::Result<()> {
         for note in self.list_trash()? {
             gone(fs::remove_file(self.trash.join(&note.id)))?;
@@ -196,7 +168,6 @@ impl Store {
     }
 }
 
-/// Deletes a file if it holds `text`. One that is already gone is as gone as was asked.
 fn remove_if_holds(path: &Path, text: &str) -> io::Result<bool> {
     match fs::read(path) {
         Ok(held) if held != text.as_bytes() => Ok(false),
@@ -212,15 +183,10 @@ fn gone(removed: io::Result<()>) -> io::Result<()> {
     }
 }
 
-/// Replaces `dir/name` all at once, through a temporary file beside it.
 pub fn write_atomically(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     write_if(dir, name, text, || Ok(true)).map(|_| ())
 }
 
-/// Replaces `dir/name` if `may_replace` agrees, and says whether it did. It is
-/// asked once the text is safely in the temporary file, as late as can be, so that
-/// little time is left for the file to change after the answer.
-///
 /// The temporary file's name starts with `.~`, which Dropbox never syncs, and with
 /// a dot, which keeps it out of the list of notes.
 fn write_if(
@@ -266,8 +232,6 @@ fn replace(temp: &Path, target: &Path) -> io::Result<()> {
     fs::rename(temp, target)
 }
 
-/// Moves a file to a name that nothing has, in one system call, so that nothing can take
-/// the name in between.
 fn move_new(from: &Path, to: &Path) -> io::Result<()> {
     use rustix::{fs, io::Errno};
     match fs::renameat_with(fs::CWD, from, fs::CWD, to, fs::RenameFlags::NOREPLACE) {
@@ -285,7 +249,6 @@ fn move_new_in_two(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
-/// Moves a file into `dir` under `stem`, or the first numbered name that is free.
 fn move_to_free_name(from: &Path, dir: &Path, stem: &str) -> io::Result<NoteId> {
     let numbered = (2..).map(|n| format!("{stem}-{n}.{EXTENSION}"));
     for id in iter::once(format!("{stem}.{EXTENSION}")).chain(numbered) {
@@ -315,7 +278,6 @@ fn scan(dir: &Path) -> io::Result<Vec<Note>> {
         if id.starts_with('.') || path.extension() != Some(OsStr::new(EXTENSION)) {
             continue;
         }
-        // A file that isn't UTF-8 stays unlisted, so autosave can never touch it.
         let (Ok(text), Ok(metadata)) = (fs::read_to_string(&path), fs::metadata(&path)) else {
             continue;
         };
@@ -341,8 +303,6 @@ fn preview_of(text: &str) -> String {
         .collect()
 }
 
-/// The lines with content, without their markdown markers. A code fence is no line
-/// of content, whether or not it names a language, but the code inside it is.
 fn content_lines(text: &str) -> impl Iterator<Item = &str> {
     text.lines()
         .filter(|line| !is_fence(line))
@@ -376,15 +336,12 @@ fn clean_line(line: &str) -> &str {
         }
     }
     let s = unwrapped(s.trim()).trim();
-    // Horizontal rules and setext underlines carry no title.
     if s.bytes().all(|b| matches!(b, b'-' | b'=' | b' ')) {
         return "";
     }
     s
 }
 
-/// Without the emphasis around a whole line, such as `**this**`. Marks around only
-/// part of a line stay, or `see `this`` would lose its last backtick.
 fn unwrapped(s: &str) -> &str {
     let is_mark = |c: char| matches!(c, '*' | '_' | '`' | '~');
     let opening = &s[..s.len() - s.trim_start_matches(is_mark).len()];
@@ -483,7 +440,6 @@ mod tests {
         assert_eq!(store.list().unwrap().len(), 3);
     }
 
-    /// What the folder holds besides the trash, temporary files included.
     fn files(dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(dir)
             .unwrap()
@@ -507,8 +463,6 @@ mod tests {
     fn a_failed_save_keeps_the_previous_contents_and_cleans_up() {
         let (dir, store) = store();
         let id = store.create("old").unwrap();
-        // This folder takes no new file, though what it holds can be written over in
-        // place. Root isn't stopped.
         if fs::metadata(dir.path()).unwrap().uid() != 0 {
             let set_mode = |mode| {
                 fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
@@ -521,7 +475,6 @@ mod tests {
             assert_eq!(files(dir.path()), [id.as_str()]);
         }
 
-        // A directory in the way can be neither read nor replaced.
         fs::create_dir(dir.path().join("blocked.md")).unwrap();
         assert!(store.save("blocked.md", "", "new").is_err());
         assert!(write_atomically(dir.path(), "blocked.md", "new").is_err());
@@ -649,7 +602,6 @@ mod tests {
         fs::write(dir.path().join("real.md"), "real").unwrap();
         let ids: Vec<_> = store.list().unwrap().into_iter().map(|n| n.id).collect();
         assert_eq!(ids, ["real.md"]);
-        // The skipped file is left exactly as it was.
         assert_eq!(
             fs::read(dir.path().join("binary.md")).unwrap(),
             [0xff, 0xfe, 0x00]

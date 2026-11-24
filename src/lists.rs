@@ -1,11 +1,6 @@
-//! Lists that keep up with typing: Enter starts the next item, and a key ticks a
-//! task. Each function reads the note and answers with one edit for the editor to
-//! make, so the editor stays the only thing that changes the text.
-
 use crate::store::is_fence;
 use std::ops::Range;
 
-/// One replacement in a note's text. Offsets are bytes, as the editor counts them.
 #[derive(Debug, PartialEq)]
 pub struct Edit {
     pub range: Range<usize>,
@@ -13,8 +8,6 @@ pub struct Edit {
 }
 
 impl Edit {
-    /// Where a cursor at `offset` is once the edit is made: it stays with the text
-    /// it was in, and one inside what was replaced lands after the replacement.
     pub fn moved(&self, offset: usize) -> usize {
         if offset >= self.range.end {
             offset - self.range.len() + self.text.len()
@@ -28,14 +21,11 @@ impl Edit {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Marker {
-    /// `-`, `*` or `+`.
     Bullet(char),
-    /// A number and the `.` or `)` after it.
     Number(u64, char),
 }
 
 impl Marker {
-    /// The marker of the item after this one, with the space that follows it.
     fn next(self) -> String {
         match self {
             Marker::Bullet(bullet) => format!("{bullet} "),
@@ -46,20 +36,16 @@ impl Marker {
     }
 }
 
-/// A line that is a list item. Offsets are bytes within the line.
 #[derive(Debug, PartialEq)]
 struct Item<'a> {
     indent: &'a str,
     marker: Marker,
-    /// Where the text after the marker starts, which is the box for a task.
     after_marker: usize,
-    /// The character between a task's brackets, and whether it is ticked.
     task: Option<(usize, bool)>,
     content: &'a str,
 }
 
 impl Item<'_> {
-    /// What starts the item after this one. A task is followed by one still to do.
     fn next_prefix(&self) -> String {
         let task = if self.task.is_some() { "[ ] " } else { "" };
         format!("{}{}{task}", self.indent, self.marker.next())
@@ -70,7 +56,6 @@ fn indent_of(line: &str) -> &str {
     &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
-/// `---`, `* * *` and the like, which start with a bullet's character but are rules.
 fn is_rule(line: &str) -> bool {
     let mut marks = line.chars().filter(|c| !c.is_whitespace());
     let Some(first) = marks.next() else {
@@ -108,7 +93,6 @@ fn item(line: &str) -> Option<Item<'_>> {
         Some("[x]" | "[X]") => Some(true),
         _ => None,
     };
-    // A box only counts when it stands alone, as `[x]y` is the start of a link.
     let (task, content) = match ticked {
         Some(ticked) if after.len() == 3 || after[3..].starts_with(' ') => (
             Some((after_marker + 1, ticked)),
@@ -125,12 +109,10 @@ fn item(line: &str) -> Option<Item<'_>> {
     })
 }
 
-/// Whether the text after `before` is inside a code block, where a dash is a dash.
 fn in_code(before: &str) -> bool {
     before.lines().filter(|line| is_fence(line)).count() % 2 == 1
 }
 
-/// The line holding `offset`, and where it starts.
 fn line_at(text: &str, offset: usize) -> (usize, &str) {
     let start = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
     let end = text[offset..]
@@ -139,8 +121,6 @@ fn line_at(text: &str, offset: usize) -> (usize, &str) {
     (start, text[start..end].trim_end_matches('\r'))
 }
 
-/// What the item ending just above `line_start` is nested in: the nearest item
-/// above it that is indented less.
 fn parent<'a>(text: &'a str, line_start: usize, indent: &str) -> Option<Item<'a>> {
     text[..line_start]
         .lines()
@@ -150,13 +130,8 @@ fn parent<'a>(text: &'a str, line_start: usize, indent: &str) -> Option<Item<'a>
         .find(|above| above.indent.len() < indent.len())
 }
 
-/// The edit to make once Enter has put the cursor on a new line, at `cursor`.
-///
-/// After an item, the new line starts the next one. After an item left empty, the
-/// list goes back a level instead, and at the first level it ends.
 pub fn after_enter(text: &str, cursor: usize) -> Option<Edit> {
     let (new_start, _) = line_at(text, cursor);
-    // Only the indentation the editor carries over may stand before the cursor.
     if new_start == 0 || !text[new_start..cursor].trim().is_empty() {
         return None;
     }
@@ -180,8 +155,6 @@ pub fn after_enter(text: &str, cursor: usize) -> Option<Edit> {
     })
 }
 
-/// The edit that ticks the task on the cursor's line, or unticks it. A line that
-/// isn't a task becomes one.
 pub fn toggle_task(text: &str, cursor: usize) -> Option<Edit> {
     let (start, line) = line_at(text, cursor);
     if in_code(&text[..start]) || is_fence(line) {
@@ -208,8 +181,6 @@ pub fn toggle_task(text: &str, cursor: usize) -> Option<Edit> {
 mod tests {
     use super::*;
 
-    /// Applies what Enter does at `|`: the editor's newline with the line's own
-    /// indentation, then the edit. The result has `|` where the cursor ends up.
     fn enter(text: &str) -> String {
         let at = text.find('|').unwrap();
         let (line_start, line) = line_at(text, at);
@@ -277,7 +248,6 @@ mod tests {
             enter("- [x] a\n    - b\n    - |"),
             "- [x] a\n    - b\n- [ ] |"
         );
-        // Nothing above to go back to: the list ends.
         assert_eq!(enter("  - |"), "|");
         assert_eq!(enter("- a\n\n  - |"), "- a\n\n|");
     }
@@ -316,7 +286,6 @@ mod tests {
 
     #[test]
     fn only_a_fresh_line_gets_a_marker() {
-        // The cursor isn't where Enter leaves it: nothing to add.
         assert_eq!(after_enter("- a\nb", 5), None);
         assert_eq!(after_enter("- a", 3), None);
         assert_eq!(after_enter("", 0), None);

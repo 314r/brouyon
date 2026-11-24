@@ -1,6 +1,3 @@
-//! The Brouyon window: which note is open, when it is saved, when the app moves
-//! on to a blank note, and how all of that is drawn.
-
 use crate::{
     checked::{IdleDelay, NotesDir, TextPercent},
     config::{Config, CopyFormat, ThemeMode},
@@ -37,14 +34,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// Saving waits for this pause in typing, so a burst of keys is one write.
 const SAVE_DELAY: Duration = Duration::from_millis(400);
-/// How long the strip under the note says that it was copied.
 const COPIED_NOTICE: Duration = Duration::from_secs(2);
-/// How long it says what became of a note that changed elsewhere: long enough to
-/// read while typing.
 const CHANGE_NOTICE: Duration = Duration::from_secs(8);
-/// A sync client brings its changes in a burst, which is read once it ends.
 const FOLDER_SETTLE: Duration = Duration::from_millis(100);
 pub(crate) const KEY_CONTEXT: &str = "Brouyon";
 
@@ -112,8 +104,6 @@ pub fn init(cx: &mut App) {
     cx.observe_global::<Desktop>(use_mono_font).detach();
 }
 
-/// The only way out, from any window, the menu or with no window at all: whoever holds
-/// the text is asked.
 fn ask_to_quit(cx: &mut App) {
     let holder = |window: gpui_kit::AnyWindowHandle| window.downcast::<Brouyon>();
     match cx.windows().into_iter().find_map(holder) {
@@ -124,10 +114,6 @@ fn ask_to_quit(cx: &mut App) {
     }
 }
 
-/// gpui-omarchy looks the monospace font up only once, so a font changed since then
-/// comes from [`Desktop`]. A new theme arrives with the old one, and this runs before
-/// it's drawn. Writing notifies observers of the theme, this among them, and the second
-/// time through there's nothing left to change.
 fn use_mono_font(cx: &mut App) {
     let theme = cx.omarchy();
     let wanted = cx
@@ -161,8 +147,6 @@ pub fn apply_theme(mode: ThemeMode, cx: &mut App) {
     use_mono_font(cx);
 }
 
-/// A Mac has no Omarchy theme, so the palette follows its light or dark appearance.
-/// `macos::follow_appearance` applies it again when that changes.
 #[cfg(not(test))]
 fn follow_desktop_theme(cx: &mut App) {
     use gpui_kit::WindowAppearance;
@@ -184,30 +168,17 @@ fn follow_desktop_theme(cx: &mut App) {
     Theme::system_or_default().apply(cx);
 }
 
-// The spacing of the note list, in rems. On a Mac each note is a rounded highlight
-// set in from the list's sides, with space between them and at the list's ends, as
-// in Finder's sidebar. On Linux the rows fill the list and touch.
-
-/// Between the list's sides and a note's highlight.
 const ROW_INSET: f32 = if MAC { 0.375 } else { 0. };
-/// Between a note's highlight and its text.
 const ROW_PADDING: f32 = if MAC { 0.625 } else { 0.75 };
-/// Between two notes' highlights.
 const ROW_GAP: f32 = if MAC { 0.25 } else { 0. };
-/// Above the first note and below the last, besides half the gap.
 const LIST_END: f32 = if MAC { 0.375 } else { 0. };
 
-/// The colours of a note's row: its highlight, if any, its title and the date and
-/// preview under it.
 struct RowColors {
     fill: Option<gpui_kit::Hsla>,
     title: gpui_kit::Hsla,
     detail: gpui_kit::Hsla,
 }
 
-/// The note being shown stands out in the theme's accent. On a Mac, as in Finder,
-/// its highlight is the system's accent with white text while the window is in front,
-/// and grey once it isn't.
 fn row_colors(t: &Theme, selected: bool, active: bool) -> RowColors {
     match (selected, MAC, active) {
         (false, ..) => RowColors {
@@ -233,11 +204,8 @@ fn row_colors(t: &Theme, selected: bool, active: bool) -> RowColors {
     }
 }
 
-/// The space between the note's text and the window's right edge, in rems.
 const NOTE_RIGHT: f32 = 1.;
 
-/// The space the editor keeps inside its own edges: it keeps the note off the
-/// window's right edge itself, so that its scrollbar runs along that edge.
 fn note_paddings(window: &Window) -> gpui_kit::Edges<Pixels> {
     gpui_kit::Edges {
         right: rems(NOTE_RIGHT).to_pixels(window.rem_size()),
@@ -245,38 +213,27 @@ fn note_paddings(window: &Window) -> gpui_kit::Edges<Pixels> {
     }
 }
 
-/// The space above and below a note's highlight, in rems: half the gap on each side,
-/// and at the list's ends, its own space besides.
 fn row_spacing(row: usize, count: usize) -> (f32, f32) {
     let half = ROW_GAP / 2.;
     let end = |at_end: bool| if at_end { half + LIST_END } else { half };
     (end(row == 0), end(row + 1 == count))
 }
 
-/// The height of the buttons in the bars along the bottom of the main window, in rems.
 const BAR_BUTTON_HEIGHT: f32 = 1.875;
 
-/// How far a bottom bar's buttons sit from the window's bottom edge: the bar under
-/// its top border, less the button, shared above and below. On a Mac the buttons at
-/// the ends keep as far from the side edges, so their corners can follow the
-/// window's.
 fn bar_inset(window: &Window) -> Pixels {
     let rem = window.rem_size();
     (rems(BAR_HEIGHT).to_pixels(rem) - px(1.) - rems(BAR_BUTTON_HEIGHT).to_pixels(rem)) / 2.
 }
 
-/// A button in a bottom bar. On a Mac its corners are concentric with the window's:
-/// as round as the window's, less the distance between them.
 fn bar_button(button: Button, window: &Window) -> Button {
     button.h(rems(BAR_BUTTON_HEIGHT)).when(MAC, |button| {
         button.rounded((px(macos::WINDOW_CORNER) - bar_inset(window)).max(px(0.)))
     })
 }
 
-/// What the editor pane is showing. The list being shown follows from it.
 #[derive(Clone, Debug, PartialEq)]
 enum Selection {
-    /// A new note with no file yet. The first save creates one.
     Blank,
     Note(NoteId),
     Trashed(NoteId),
@@ -288,32 +245,21 @@ impl Selection {
     }
 }
 
-/// The open note's file as it was last read or written. A save that finds the file
-/// holding anything else leaves it alone, so that what another program or another
-/// device wrote is never lost. Compared with the file, never with the editor.
 struct Loaded {
     text: String,
     modified: SystemTime,
 }
 
-/// What a save did with the editor's text.
 enum Flushed {
-    /// There was nothing to write: no text, or the text the file already holds.
     Nothing,
-    /// The note's file holds the text. For a blank note, the file is new.
     Wrote(NoteId),
-    /// The note was emptied and its file removed.
     Removed,
-    /// The note was emptied, but its file changed elsewhere and was kept.
     KeptTheirs,
-    /// The file changed elsewhere, so the text went into a new note beside it.
     KeptBoth(NoteId),
 }
 
-/// A destructive action waiting for an answer in the confirmation dialog.
 #[derive(Clone)]
 enum Confirm {
-    /// The note, and its text as it was shown.
     DeleteForever(NoteId, SharedString),
     EmptyTrash,
 }
@@ -324,43 +270,29 @@ pub struct Brouyon {
     notes: Vec<Note>,
     trash: Vec<Note>,
     selection: Selection,
-    /// The note the Notes tab goes back to from the Trash. `None` means a blank one.
     before_trash: Option<NoteId>,
-    /// Rebuilt for each note, so undo history never crosses between notes.
     editor: Entity<EditorState>,
     _editor_events: [Subscription; 2],
-    /// What the editor held when last looked at, to tell a change to its text from
-    /// anything else that happens in it.
     seen: SharedString,
-    /// The field above the list. What it holds only counts while it is open.
     filter: Entity<InputState>,
     filter_open: bool,
-    /// What the list was last narrowed down to, to start again from its top when it changes.
     listed_for: Vec<String>,
     save_state: SaveState,
-    /// `None` for a blank note and in the Trash, which have no file to save to.
     loaded: Option<Loaded>,
     problem: Option<SharedString>,
-    /// What became of a note that changed elsewhere, said for a moment.
     notice: Option<SharedString>,
     notice_task: Option<Task<()>>,
-    /// Follows the notes folder, once [`Self::watch_notes`] has started it.
     notes_watch: Option<Task<()>>,
-    /// What went wrong with the last setting, shown until one succeeds.
     pub settings_problem: Option<SharedString>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
     save_task: Option<Task<()>>,
     idle_task: Option<Task<()>>,
-    /// How many words the editor holds, kept up as they are typed.
     words: usize,
-    /// How the open note was just copied, for the strip to say so.
     copied: Option<CopyFormat>,
     copied_task: Option<Task<()>>,
-    /// The menu of formats beside the copy button is showing.
     copy_menu_open: bool,
     confirm: Option<Confirm>,
     shortcuts_open: bool,
-    /// Held by whichever dialog is open.
     dialog_focus: gpui_kit::FocusHandle,
     list_scroll: VirtualListScrollHandle,
     title_bar: TitleBar,
@@ -484,8 +416,6 @@ impl Brouyon {
         self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
             this.update_in(cx, |this, window, cx| {
-                // A change that arrived during the typing was left for
-                // the save to settle, and can be taken now.
                 if this.flush(cx).is_some() {
                     this.refresh_open_note(window, cx);
                 }
@@ -501,7 +431,7 @@ impl Brouyon {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The editor has made its new line by now. Shift+Enter keeps it plain.
+        // The editor has made its new line by now.
         if let InputEvent::PressEnter { shift: false, .. } = event {
             self.edit_list(lists::after_enter, window, cx);
         }
@@ -515,8 +445,6 @@ impl Brouyon {
         cx: &mut Context<Self>,
     ) {
         match event {
-            // Enter opens the first note found. With nothing to find, it goes back
-            // to the note.
             InputEvent::PressEnter { .. } if self.terms(cx).is_empty() => {
                 self.close_filter();
                 self.focus_content(window, cx);
@@ -531,8 +459,6 @@ impl Brouyon {
         }
     }
 
-    /// Shows the field that narrows the list down, empty, and puts the cursor in it.
-    /// Already shown, its text is selected, ready to be typed over.
     fn open_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let nothing_kept = self.terms(cx).is_empty();
         self.filter_open = true;
@@ -546,12 +472,10 @@ impl Brouyon {
         cx.notify();
     }
 
-    /// Lists every note again. Whoever calls this decides where the keyboard goes.
     fn close_filter(&mut self) {
         self.filter_open = false;
     }
 
-    /// The words a note has to hold to be listed. None lists every note.
     fn terms(&self, cx: &App) -> Vec<String> {
         if !self.filter_open {
             return Vec::new();
@@ -559,8 +483,6 @@ impl Brouyon {
         store::terms(&self.filter.read(cx).value())
     }
 
-    /// Makes the edit `edit` finds for the text and the cursor, if any. It goes
-    /// through the editor like typing does, so it is saved and can be undone.
     fn edit_list(
         &mut self,
         edit: fn(&str, usize) -> Option<lists::Edit>,
@@ -582,11 +504,6 @@ impl Brouyon {
         });
     }
 
-    /// Writes any pending text. Nothing if it could not be saved, in which case it
-    /// stays in the editor.
-    ///
-    /// A file that changed elsewhere since it was read is never written over: the
-    /// text goes into a new note beside it, which the editor carries on in.
     fn flush(&mut self, cx: &mut Context<Self>) -> Option<Kept> {
         self.save_task = None;
         if let Some(kept) = self.save_state.kept() {
@@ -594,11 +511,8 @@ impl Brouyon {
         }
         let text = self.editor.read(cx).value();
         let empty = text.trim().is_empty();
-        // A note always has what it was loaded as. Should it not, nothing but a
-        // missing file would match, and the text would go beside the file.
         let loaded = self.loaded.as_ref().map_or("", |loaded| &loaded.text);
         let flushed = match &self.selection {
-            // Typed and taken back, such as with undo.
             Selection::Note(_) if loaded == &*text => Ok(Flushed::Nothing),
             Selection::Note(id) if empty => {
                 self.store
@@ -633,8 +547,6 @@ impl Brouyon {
         }
     }
 
-    /// Follows a save in the list and in what is open. An ordinary save moves the
-    /// note to the top without rescanning the folder on every pause in typing.
     fn record_save(&mut self, flushed: Flushed, text: &str, cx: &mut Context<Self>) {
         let (id, kept_both) = match flushed {
             Flushed::Nothing => return,
@@ -656,7 +568,6 @@ impl Brouyon {
             Selection::Note(open) => self.notes.iter().position(|note| note.id == *open),
             _ => None,
         };
-        // A note just begun has to be in the list, whatever was being looked for.
         if self.selection == Selection::Blank {
             self.close_filter();
         }
@@ -665,7 +576,6 @@ impl Brouyon {
             .modified(&id)
             .unwrap_or_else(|_| SystemTime::now());
         if kept_both {
-            // The other version is a note of its own from now on, to list as it is.
             self.reload_lists();
             self.say("Changed elsewhere. Your version is a new note.", cx);
         } else {
@@ -683,7 +593,6 @@ impl Brouyon {
         }
     }
 
-    /// Says `notice` under the note for a moment.
     fn say(&mut self, notice: &'static str, cx: &mut Context<Self>) {
         self.notice = Some(notice.into());
         self.notice_task = Some(cx.spawn(async move |this, cx| {
@@ -710,13 +619,10 @@ impl Brouyon {
         }
     }
 
-    /// Opens `selection`, saving the current note first. Stays put if either step fails.
     fn select(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         let Some(kept) = self.flush(cx) else {
             return;
         };
-        // Reselecting the open note keeps its cursor and undo history. A blank
-        // note is always rebuilt, which drops the history of an emptied note.
         if selection == self.selection && selection != Selection::Blank {
             self.focus_content(window, cx);
             return;
@@ -724,7 +630,6 @@ impl Brouyon {
         self.open(selection, kept, window, cx);
     }
 
-    /// Shows `selection` in a fresh editor.
     fn open(&mut self, selection: Selection, _: Kept, window: &mut Window, cx: &mut Context<Self>) {
         let text = match &selection {
             Selection::Blank => Ok(String::new()),
@@ -745,8 +650,6 @@ impl Brouyon {
         if !readonly {
             self.before_trash = None;
         }
-        // What was looked for belongs to the list it was typed over, and a blank
-        // note starts afresh, as when the app opens.
         if selection == Selection::Blank || readonly != self.selection.in_trash() {
             self.close_filter();
         }
@@ -776,7 +679,6 @@ impl Brouyon {
     }
 
     fn on_idle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A dialog on screen waits to be closed.
         if self.dialog_is_open() {
             self.restart_idle_timer(window, cx);
             return;
@@ -791,7 +693,6 @@ impl Brouyon {
             return;
         }
         self.select(Selection::Blank, window, cx);
-        // Stays on a note whose save failed, and tries again later.
         if self.save_state.kept().is_none() {
             self.restart_idle_timer(window, cx);
         }
@@ -805,7 +706,6 @@ impl Brouyon {
         }
     }
 
-    /// `text` as just read from a note's file, with the file's date.
     fn loaded_now(&self, id: &str, text: String) -> Loaded {
         let modified = self
             .store
@@ -814,9 +714,6 @@ impl Brouyon {
         Loaded { text, modified }
     }
 
-    /// Follows the notes folder, so that what another program or a sync client
-    /// changes shows as it happens, not only when the window next gets focus.
-    /// Without it nothing is lost, since a save never writes over such a change.
     pub fn watch_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let folders = self.store.folders();
         self.notes_watch = match FolderWatcher::new(&folders, false) {
@@ -824,7 +721,6 @@ impl Brouyon {
                 while events.recv().await.is_ok() {
                     cx.background_executor().timer(FOLDER_SETTLE).await;
                     while events.try_recv().is_ok() {}
-                    // The trash may have been replaced, and is read after it is watched.
                     watcher.arm(&folders);
                     let synced =
                         this.update_in(cx, |this, window, cx| this.sync_with_disk(window, cx));
@@ -840,17 +736,12 @@ impl Brouyon {
         };
     }
 
-    /// Picks up changes made outside the app, such as a note edited in another
-    /// program or on another device.
     fn sync_with_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reload_lists();
         self.refresh_open_note(window, cx);
         cx.notify();
     }
 
-    /// Brings the open note up to date with its file, in the editor it is in: this
-    /// can happen at any moment, and must not take the keyboard from wherever it is.
-    /// A note with pending edits is left for its next save, which keeps both.
     fn refresh_open_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(kept) = self.save_state.kept() else {
             return;
@@ -865,7 +756,6 @@ impl Brouyon {
                     {
                         self.show_in_place(&text, kept, window, cx);
                     }
-                    // The date alone can change, and is shown.
                     self.loaded = Some(self.loaded_now(&id, text));
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -873,10 +763,8 @@ impl Brouyon {
                     self.loaded = None;
                     self.show_in_place("", kept, window, cx);
                 }
-                // Not to be read just now, which is no reason to let go of it.
                 Err(_) => {}
             },
-            // A dialog on screen holds the keyboard, and may be about this note.
             Selection::Trashed(id)
                 if !self.dialog_is_open() && !self.trash.iter().any(|note| note.id == id) =>
             {
@@ -886,9 +774,6 @@ impl Brouyon {
         }
     }
 
-    /// Replaces the editor's text without a new editor, which would take the
-    /// keyboard. The cursor goes back to the start and the undo history is dropped,
-    /// as the text it belonged to is no longer there.
     fn show_in_place(&mut self, text: &str, _: Kept, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |state, cx| {
             state.set_value(text.to_owned(), window, cx);
@@ -900,9 +785,6 @@ impl Brouyon {
         self.copy_menu_open = false;
     }
 
-    /// Saves before the window goes. The first attempt to leave after a failed save
-    /// is refused so the error can be seen, and a second one is let through. Only a
-    /// failed save counts: another problem on screen says nothing about this text.
     fn may_leave(&mut self, cx: &mut Context<Self>) -> Option<MayLeave> {
         let warned = self.save_state.warned();
         let kept = self.flush(cx);
@@ -910,14 +792,12 @@ impl Brouyon {
             .or_else(|| warned.map(Warned::may_leave_anyway))
     }
 
-    /// Quitting skips the window's own close, so it asks the same question.
     fn quit(&mut self, cx: &mut Context<Self>) {
         if let Some(leave) = self.may_leave(cx) {
             leave.quit(cx);
         }
     }
 
-    /// Closes the window from a key or a menu, as its own button would.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(leave) = self.on_close(cx) {
             leave.close(window);
@@ -929,8 +809,6 @@ impl Brouyon {
         if leave.is_some()
             && let Some(settings) = self.settings_window
         {
-            // The app runs until its last window closes, and Settings can't
-            // outlive the window it belongs to.
             settings
                 .update(cx, |_, window, _| kept::close_textless(window))
                 .ok();
@@ -938,9 +816,6 @@ impl Brouyon {
         leave
     }
 
-    /// The rows of the list being shown, top to bottom: the notes or the trash,
-    /// narrowed down to what is being looked for. A blank note has a row of its own
-    /// above the notes, unless something is being looked for.
     fn rows(&self, cx: &App) -> Vec<Selection> {
         let terms = self.terms(cx);
         let found = |note: &&Note| note.matches(&terms);
@@ -971,8 +846,6 @@ impl Brouyon {
         }
     }
 
-    /// Moves through the list. Going up from the first note reaches a blank one,
-    /// and going down from a note that isn't listed reaches the first that is.
     fn step(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.flush(cx).is_none() {
             return;
@@ -996,7 +869,6 @@ impl Brouyon {
     }
 
     fn move_to_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Text typed moments ago may not have a file yet.
         let before = self.selection.clone();
         let Some(kept) = self.flush(cx) else {
             return;
@@ -1004,8 +876,6 @@ impl Brouyon {
         let Selection::Note(id) = self.selection.clone() else {
             return;
         };
-        // The save found the note changed elsewhere and kept both. Neither is what
-        // was on screen when the key was pressed, so neither goes without a look.
         if matches!(before, Selection::Note(_)) && before != self.selection {
             return;
         }
@@ -1021,7 +891,6 @@ impl Brouyon {
         }
     }
 
-    /// The Notes tab: back to the note shown before the Trash, if it's still there.
     fn show_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selection.in_trash() {
             self.focus_content(window, cx);
@@ -1034,7 +903,6 @@ impl Brouyon {
         self.select(before.map_or(Selection::Blank, Selection::Note), window, cx);
     }
 
-    /// The Trash tab, which shows its first note. An empty trash has nothing to show.
     fn show_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selection.in_trash() {
             return;
@@ -1062,8 +930,6 @@ impl Brouyon {
         }
     }
 
-    /// Once a note has left the trash: the first one still listed, or the notes.
-    /// When none of what was looked for is left, the whole trash is listed again.
     fn show_next_trashed(&mut self, kept: Kept, window: &mut Window, cx: &mut Context<Self>) {
         if self.rows(cx).is_empty() {
             self.close_filter();
@@ -1090,9 +956,6 @@ impl Brouyon {
         }
     }
 
-    /// Puts the open note on the clipboard as it stands, saved or not, and keeps
-    /// `format` for the button's next click. A note with nothing in it is left out,
-    /// so it can't replace what the clipboard holds.
     fn copy_note(&mut self, format: CopyFormat, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value();
         if text.trim().is_empty() {
@@ -1123,7 +986,6 @@ impl Brouyon {
         cx.notify();
     }
 
-    /// Asks about the note on screen, with the text it shows.
     fn ask_to_delete_forever(&mut self, id: NoteId, window: &mut Window, cx: &mut Context<Self>) {
         self.ask(Confirm::DeleteForever(id, self.seen.clone()), window, cx);
     }
@@ -1239,8 +1101,6 @@ impl Brouyon {
         }
     }
 
-    /// Moves to another folder, or back to the default one with `None`. The open
-    /// note is saved where it was begun, and existing notes don't move.
     pub fn set_notes_dir(
         &mut self,
         dir: Option<NotesDir>,
@@ -1272,8 +1132,6 @@ impl Brouyon {
         if self.notes_watch.is_some() {
             self.watch_notes(window, cx);
         }
-        // A question about a note in the old folder must not act on the new one,
-        // where a note can have the same name.
         self.confirm = None;
         let saved = self.config.set_notes_dir(dir);
         self.reload_lists();
@@ -1284,18 +1142,13 @@ impl Brouyon {
     fn sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = cx.omarchy().clone();
         let in_trash = self.selection.in_trash();
-        // Wide enough for a title and its date on one line, unless the editor needs it.
         let narrow = is_narrow(window);
         let rem = window.rem_size();
         let mut width = rems(if narrow { 11.25 } else { 20. }).to_pixels(rem);
-        // On macOS the window's buttons take the header's left, which the narrow
-        // list needs for its tabs. They replace its padding.
         let buttons = self.title_bar.buttons_width(window);
         if narrow && let Some(buttons) = buttons {
             width += buttons - rems(0.75).to_pixels(rem);
         }
-        // A tab's bar reaches past its label, which stays in line with the titles
-        // in the list below: the first tab starts that much before them.
         let tabs = Tabs::new("note-tabs")
             .flex()
             .h_full()
@@ -1325,7 +1178,6 @@ impl Brouyon {
                 })),
             format!("New note ({})", shortcuts::NEW_NOTE),
         );
-        // The narrow list has no room for it beside the tabs. The key still works.
         let find = (!narrow).then(|| {
             with_tooltip(
                 button("find-note", "", ButtonVariant::Secondary, cx)
@@ -1336,8 +1188,6 @@ impl Brouyon {
                 format!("Find a note ({})", shortcuts::FIND_NOTE),
             )
         });
-        // Under the window's buttons, and between the tabs and the header's own, the
-        // header moves the window as a title bar would.
         let under_buttons = buttons.map(|buttons| {
             self.title_bar
                 .drag_area()
@@ -1424,8 +1274,6 @@ impl Brouyon {
             list.into_any_element()
         };
 
-        // What is about the app and the list is under the list. The strip beside
-        // it, under the note, only holds what is about that note.
         let settings = with_tooltip(
             bar_button(
                 button("settings", "", ButtonVariant::Secondary, cx)
@@ -1453,8 +1301,6 @@ impl Brouyon {
             .items_center()
             .justify_between()
             .h(rems(BAR_HEIGHT))
-            // The gear's own padding sets its icon in line with the titles, except on
-            // a Mac, where it keeps off the window's corner.
             .pl(if MAC {
                 bar_inset(window)
             } else {
@@ -1509,8 +1355,6 @@ impl Brouyon {
                 format_date(note.modified, chrono::Local::now()).into(),
                 "".into(),
             ),
-            // While looking for something, the line it was found on says more than
-            // the one under the title.
             Some(note) => (
                 note.title.clone().into(),
                 format_date(note.modified, chrono::Local::now()).into(),
@@ -1563,7 +1407,6 @@ impl Brouyon {
                             .child(date),
                     ),
             )
-            // Empty, it keeps its line, so a title sits at the same height in every row.
             .child(
                 div()
                     .debug_selector(|| format!("note-row-{row}-{preview}"))
@@ -1606,8 +1449,6 @@ impl Brouyon {
                             .size_full()
                             .child(Editor::new(&self.editor)),
                     )
-                    // Above the note, the window's top edge moves it, as a title bar
-                    // would on macOS.
                     .when(title_bar::DRAWN, |pane| {
                         pane.relative().child(
                             self.title_bar
@@ -1697,8 +1538,6 @@ impl Brouyon {
             }
             _ => actions,
         };
-        // A narrow window has no room for them beside Restore and Delete forever.
-        // The key still works.
         let copy = match self.selection {
             Selection::Blank => false,
             Selection::Note(_) => true,
@@ -1707,7 +1546,6 @@ impl Brouyon {
         .then(|| self.copy_buttons(window, cx));
         let copying = copy.is_some();
         let noted = self.selection != Selection::Blank;
-        // A narrow window has no room for it. A blank note has none to count.
         let words = (!is_narrow(window) && (noted || self.words > 0)).then(|| {
             div()
                 .debug_selector(|| "word-count".into())
@@ -1716,10 +1554,7 @@ impl Brouyon {
                     words => format!("{words} words"),
                 })
         });
-        // Gone with its button, so that it doesn't come back open.
         self.copy_menu_open &= copying;
-        // Copying is at one end and the Trash at the other, so that reaching for
-        // the first can't land on the second.
         let left = div()
             .flex()
             .items_center()
@@ -1734,11 +1569,7 @@ impl Brouyon {
             .justify_between()
             .gap(rems(0.75))
             .h(rems(BAR_HEIGHT))
-            // In line with the note's text: the status, or the copy button's icon,
-            // which the button's own padding sets in.
             .pl(rems(if copying { 0.8125 } else { 1.5 }))
-            // On a Mac, the button in the corner keeps as far off the side as off the
-            // bottom.
             .pr(if MAC {
                 bar_inset(window)
             } else {
@@ -1755,16 +1586,12 @@ impl Brouyon {
                     .flex_shrink_0()
                     .items_center()
                     .gap(rems(0.5))
-                    // A note just begun has no button there to keep the count
-                    // off the edge.
                     .when(!noted, |right| right.pr(rems(0.625)))
                     .children(words)
                     .child(actions),
             )
     }
 
-    /// The button that copies the note in the format last chosen, and beside it
-    /// the menu that copies it in either one.
     fn copy_buttons(
         &mut self,
         window: &Window,
@@ -1801,7 +1628,6 @@ impl Brouyon {
             .px(rems(0.125))
             .styles(move |styles| styles.selected(move |style| style.bg(pressed)))
             .child(icon(IconName::ChevronUp).size(rems(0.875)));
-        // Its tooltip would come up over the open menu.
         let trigger = if self.copy_menu_open {
             trigger
         } else {
@@ -1820,14 +1646,11 @@ impl Brouyon {
                 chosen.update(cx, |this, cx| this.copy_note(CopyFormat::ALL[index], cx));
             },
         )
-        // The strip is at the bottom of the window, so the menu opens above it.
         .anchor(Anchor::BottomLeft)
-        // Kept here so that whatever takes the keyboard elsewhere can close the menu.
         .open(self.copy_menu_open)
         .on_open_change(move |open, window, cx| {
             changed.update(cx, |this, cx| {
                 this.copy_menu_open = *open;
-                // However it closes, typing carries on in the note.
                 if !*open {
                     this.focus_content(window, cx);
                 }
@@ -1911,8 +1734,6 @@ impl Brouyon {
         if !self.shortcuts_open {
             return None;
         }
-        // What a small window can't show at once is scrolled to. The rest of the
-        // height is the dialog's title, its padding and a margin around it.
         let room = window.viewport_size().height - rems(7.).to_pixels(window.rem_size());
         let t = cx.omarchy().clone();
         let close = cx.listener(|this, _: &bool, window, cx| this.toggle_shortcuts(window, cx));
@@ -1997,13 +1818,11 @@ impl Render for Brouyon {
                 this.restart_idle_timer(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close(window, cx)))
-            // The key that opens the shortcuts closes them too, but a question comes first.
             .when(!questioning, |root| {
                 root.on_action(cx.listener(|this, _: &ToggleShortcuts, window, cx| {
                     this.toggle_shortcuts(window, cx);
                 }))
             })
-            // An open dialog keeps the keyboard to itself.
             .when(!answering, |root| {
                 root.on_action(cx.listener(|this, _: &NewNote, window, cx| {
                     this.select(Selection::Blank, window, cx);
@@ -2018,7 +1837,6 @@ impl Render for Brouyon {
                     this.step(true, window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &ToggleTask, window, cx| {
-                    // Anywhere but in the note, the key keeps its usual meaning.
                     if this.editor.focus_handle(cx).is_focused(window) {
                         this.edit_list(lists::toggle_task, window, cx);
                     } else {
@@ -2082,20 +1900,12 @@ impl Render for Brouyon {
     }
 }
 
-/// Too narrow for everything, so the list is thinner and buttons with a key to
-/// do the same are left out where they'd crowd the rest.
 fn is_narrow(window: &Window) -> bool {
     window.viewport_size().width < rems(45.).to_pixels(window.rem_size())
 }
 
-/// How far a tab's bar reaches past its label and count on each side, in rems.
-/// Two tabs side by side keep twice this between their labels.
 const TAB_PADDING: f32 = 0.5;
 
-/// A tab above the list: a small capital label with its count after it, and a
-/// bar in the accent under the current one, wider than the two by the same on
-/// both sides. The bar lies over the tab's bottom edge and takes no room there,
-/// so the label stays in the middle of the header, level with its buttons.
 fn panel_tab(
     id: &'static str,
     label: &'static str,
@@ -2191,7 +2001,6 @@ fn format_date(time: SystemTime, now: chrono::DateTime<chrono::Local>) -> String
     }
 }
 
-/// What tests in other modules need to see of the main view.
 #[cfg(test)]
 impl Brouyon {
     pub fn settings_window(&self) -> Option<WindowHandle<SettingsWindow>> {
@@ -2272,7 +2081,6 @@ pub(crate) mod tests {
         wait(cx, SAVE_DELAY);
     }
 
-    /// The tests press shortcuts with Linux's Ctrl, which is ⌘ on macOS.
     pub(crate) fn on_this_system(keystrokes: &str) -> String {
         if MAC {
             keystrokes.replace("ctrl-", "cmd-")
@@ -2287,7 +2095,6 @@ pub(crate) mod tests {
         draw(cx);
     }
 
-    /// The notes on disk, ignoring the order they were created in.
     pub(crate) fn note_texts(dir: &Path) -> Vec<String> {
         texts_in(dir)
     }
@@ -2335,7 +2142,6 @@ pub(crate) mod tests {
             let focus = view.read(cx).editor.read(cx).focus_handle(cx);
             assert!(focus.is_focused(window));
         });
-        // Nothing appears on disk just from time passing.
         wait(cx, IDLE * 2);
         assert!(note_texts(dir.path()).is_empty());
     }
@@ -2372,16 +2178,12 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["hello world"], "no second file");
     }
 
-    /// Has an input method show `text` in the note, in place of what it showed before,
-    /// as it does until a word is settled on.
     fn compose(view: &Entity<Brouyon>, cx: &mut VisualTestContext, text: &str) {
         with_input_method(view, cx, |state, window, cx| {
             state.replace_and_mark_text_in_range(None, text, None, window, cx);
         });
     }
 
-    /// Ends the composition with its text left as it is. A click does this, and so does
-    /// choosing a suggestion on an iPhone.
     fn keep_composed(view: &Entity<Brouyon>, cx: &mut VisualTestContext) {
         with_input_method(view, cx, |state, window, cx| state.unmark_text(window, cx));
     }
@@ -2433,7 +2235,6 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["composed"]);
     }
 
-    /// What is left of a word is what is on screen, so that is what is saved.
     #[gpui_kit::test]
     fn a_composition_cut_short_or_taken_back_leaves_what_is_on_screen(cx: &mut TestAppContext) {
         let (dir, view, cx) = open(cx);
@@ -2450,8 +2251,6 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["typed and"], "taken back");
     }
 
-    /// In the order `main` does it. A theme applied here replaces the one `init` has
-    /// just corrected, and it isn't observed yet.
     #[gpui_kit::test]
     fn widgets_have_the_mono_font_from_the_start(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -2508,8 +2307,6 @@ pub(crate) mod tests {
     fn the_idle_delay_saves_and_moves_to_a_blank_note(cx: &mut TestAppContext) {
         let (dir, view, cx) = open(cx);
         cx.simulate_input("unfinished");
-        // Reaches the idle delay with no save in between: the pause is handled
-        // by the same clock, so check both happened.
         wait(cx, IDLE);
         assert_eq!(note_texts(dir.path()), ["unfinished"]);
         assert_eq!(selection(&view, cx), Selection::Blank);
@@ -2617,7 +2414,6 @@ pub(crate) mod tests {
         assert!(spaced(below - gap), "{below:?} below the last");
     }
 
-    /// A test window has no AppKit window to ask, so GPUI's answer stands.
     #[gpui_kit::test]
     fn without_appkit_the_window_is_in_front_when_gpui_says_so(cx: &mut TestAppContext) {
         let (_dir, _view, cx) = open(cx);
@@ -2630,7 +2426,6 @@ pub(crate) mod tests {
         assert!(!in_front(cx));
     }
 
-    /// The editor's scrollbar runs along its right edge, which is the window's.
     #[gpui_kit::test]
     fn the_note_scrollbar_runs_along_the_window_edge(cx: &mut TestAppContext) {
         let (_dir, _view, cx) = open(cx);
@@ -2687,7 +2482,6 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["old", "typed just now"]);
         assert_eq!(editor_text(&view, cx), "old", "moved to the note below");
 
-        // Merely opening a note must not rewrite it or change its date.
         wait(cx, SAVE_DELAY);
         assert_eq!(
             fs::metadata(&old).unwrap().modified().unwrap(),
@@ -2695,8 +2489,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The editor tells of more than its text, such as its cursor, and of text it was
-    /// given to show.
     #[gpui_kit::test]
     fn looking_at_a_note_or_following_its_file_never_rewrites_it(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -2720,7 +2512,6 @@ pub(crate) mod tests {
         keys(cx, "right shift-down");
         assert_eq!(date_once_left(cx), date);
 
-        // With text waiting to be saved, the change wouldn't show yet.
         keys(cx, "alt-down");
         for (text, seconds) in [("three\r\n", 2), ("four\r\n", 3)] {
             keys(cx, "right shift-down");
@@ -2932,7 +2723,6 @@ pub(crate) mod tests {
         );
         assert_eq!(before, after, "the bar is as long on both sides");
 
-        // The label starts where the titles under it do.
         if !MAC {
             let rem = cx.update(|window, _| window.rem_size());
             let row = cx.debug_bounds("note-row-0").unwrap();
@@ -2956,7 +2746,6 @@ pub(crate) mod tests {
         click("notes-tab", cx);
         assert_eq!(selection(&view, cx), Selection::Note("a.md".into()));
 
-        // The same with the keyboard.
         keys(cx, "ctrl-shift-t");
         assert!(selection(&view, cx).in_trash());
         keys(cx, "escape");
@@ -3057,7 +2846,6 @@ pub(crate) mod tests {
         click("delete-forever", cx);
         assert!(question_is_open(cx));
 
-        // Escape answers the dialog rather than also leaving the trash.
         keys(cx, "escape");
         assert!(!question_is_open(cx));
         assert!(selection(&view, cx).in_trash());
@@ -3176,7 +2964,6 @@ pub(crate) mod tests {
     fn both_redo_keys_bring_back_what_undo_took(cx: &mut TestAppContext) {
         let (_dir, view, cx) = open(cx);
         cx.simulate_input("words");
-        // Linux also has Ctrl+Y. macOS only has ⇧⌘Z.
         let redo_keys: &[&str] = if MAC {
             &["ctrl-shift-z"]
         } else {
@@ -3219,7 +3006,6 @@ pub(crate) mod tests {
         keys(cx, "enter");
         assert_eq!(editor_text(&view, cx), "- a\n  - b\n");
 
-        // An item added between two levels belongs to the one above it.
         keys(cx, "up up end enter");
         cx.simulate_input("c");
         assert_eq!(editor_text(&view, cx), "- a\n- c\n  - b\n");
@@ -3308,7 +3094,6 @@ pub(crate) mod tests {
         assert_eq!(trashed_texts(dir.path()), ["- [ ] gone"]);
     }
 
-    /// A folder of notes to look through, and one in the trash.
     fn open_with_notes_to_find(
         cx: &mut TestAppContext,
     ) -> (tempfile::TempDir, Entity<Brouyon>, &mut VisualTestContext) {
@@ -3333,7 +3118,6 @@ pub(crate) mod tests {
         open_with(cx, dir)
     }
 
-    /// The titles of the rows in the list, as shown.
     fn listed(view: &Entity<Brouyon>, cx: &mut VisualTestContext) -> Vec<String> {
         cx.update(|_, cx| {
             let this = view.read(cx);
@@ -3462,7 +3246,6 @@ pub(crate) mod tests {
         cx.simulate_input("typed in the note");
         assert_eq!(editor_text(&view, cx), "typed in the note");
 
-        // The field comes back empty.
         keys(cx, "ctrl-f");
         assert_eq!(listed(&view, cx).len(), 4);
     }
@@ -3513,7 +3296,6 @@ pub(crate) mod tests {
         assert!(!filter_is_open(&view, cx));
         assert_eq!(listed(&view, cx).len(), 4);
 
-        // So does a note begun on the blank page while looking for another.
         find(cx, "tap");
         click_editor(cx);
         type_and_save(cx, "A new thought");
@@ -3609,7 +3391,6 @@ pub(crate) mod tests {
     const MARKED_UP: &str = "# Title\n\nSome **bold** words\n";
     const NOT_MARKED_UP: &str = "Title\n\nSome bold words\n";
 
-    /// Opens on a note written in Markdown.
     fn open_marked_up(
         cx: &mut TestAppContext,
     ) -> (tempfile::TempDir, Entity<Brouyon>, &mut VisualTestContext) {
@@ -3829,7 +3610,6 @@ pub(crate) mod tests {
         draw(cx);
     }
 
-    /// On a Mac the root is the sidebar, tinted over the blur, and the note is solid.
     #[gpui_kit::test]
     fn only_the_sidebar_shows_through_on_a_mac(cx: &mut TestAppContext) {
         if !MAC {
@@ -3922,7 +3702,6 @@ pub(crate) mod tests {
         set_desktop(cx, |desktop| desktop.font = Some("Another Mono".into()));
         for mode in [ThemeMode::Light, ThemeMode::Dark, ThemeMode::Omarchy] {
             view.update(cx, |this, cx| this.set_theme(mode, cx));
-            // Parking at all shows that observing the theme doesn't feed itself.
             cx.run_until_parked();
             cx.update(|_, cx| {
                 assert_eq!(cx.omarchy().font, "Another Mono", "{mode:?}");
@@ -3945,7 +3724,6 @@ pub(crate) mod tests {
         wait(cx, IDLE);
         assert_eq!(editor_text(&view, cx), "precious", "idle didn't either");
 
-        // Once saving works again, the next attempt succeeds and clears the error.
         fs::create_dir_all(dir.path().join(".trash")).unwrap();
         wait(cx, IDLE);
         assert_eq!(note_texts(dir.path()), ["precious"]);
@@ -4003,7 +3781,6 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["switching away"]);
     }
 
-    /// Refocuses the window, which is what triggers looking at the folder again.
     fn refocus(cx: &mut VisualTestContext) {
         cx.deactivate_window();
         cx.update(|window, _| window.activate_window());
@@ -4046,7 +3823,6 @@ pub(crate) mod tests {
         assert_eq!(titles(&view, cx), ["arrived"]);
     }
 
-    /// What the watcher does when something in the notes folder changes.
     fn notice_changes(view: &Entity<Brouyon>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             view.update(cx, |this, cx| this.sync_with_disk(window, cx));
@@ -4055,7 +3831,6 @@ pub(crate) mod tests {
         draw(cx);
     }
 
-    /// Types a note, saves it, and returns where its file is.
     fn saved_note(
         dir: &Path,
         view: &Entity<Brouyon>,
@@ -4069,7 +3844,6 @@ pub(crate) mod tests {
         dir.join(id)
     }
 
-    /// Whether the strip under the note has something to read there.
     pub(crate) fn is_said(selector: &'static str, cx: &mut VisualTestContext) -> bool {
         cx.debug_bounds(selector)
             .is_some_and(|said| said.size.width > px(0.))
@@ -4123,7 +3897,6 @@ pub(crate) mod tests {
         cx.simulate_input(" and more");
         fs::write(&path, "theirs").unwrap();
 
-        // Unsaved typing is never replaced by what arrives.
         notice_changes(&view, cx);
         assert_eq!(editor_text(&view, cx), "mine and more");
         assert_eq!(note_texts(dir.path()), ["theirs"]);
@@ -4134,7 +3907,6 @@ pub(crate) mod tests {
         assert_eq!(titles(&view, cx), ["mine and more", "theirs"]);
         assert!(notice(&view, cx).unwrap().contains("new note"));
 
-        // The typing carries on in the new note, where it was.
         assert_eq!(editor_text(&view, cx), "mine and more");
         assert_eq!(cursor(&view, cx), "mine and more".len());
         type_and_save(cx, "!");
@@ -4156,7 +3928,6 @@ pub(crate) mod tests {
     ) {
         let (dir, view, cx) = open(cx);
         let path = saved_note(dir.path(), &view, cx, "mine");
-        // Nothing looked at the folder since: the editor still shows the old text.
         fs::write(&path, "theirs").unwrap();
         type_and_save(cx, " too");
         assert_eq!(note_texts(dir.path()), ["mine too", "theirs"]);
@@ -4207,7 +3978,6 @@ pub(crate) mod tests {
         assert_eq!(editor_text(&view, cx), "theirs");
         assert_eq!(titles(&view, cx), ["theirs"]);
 
-        // What was read is what the next save has to find.
         type_and_save(cx, "ours, ");
         assert_eq!(note_texts(dir.path()), ["ours, theirs"]);
         assert_eq!(notice(&view, cx), None);
@@ -4266,7 +4036,6 @@ pub(crate) mod tests {
         assert!(!editor_is_focused(&view, cx));
         assert_eq!(editor_text(&view, cx), "theirs", "the words went to Find");
 
-        // The same when the open note is gone, which shows a blank one.
         fs::remove_file(&path).unwrap();
         notice_changes(&view, cx);
         assert_eq!(selection(&view, cx), Selection::Blank);
@@ -4289,7 +4058,6 @@ pub(crate) mod tests {
         assert!(trashed_texts(dir.path()).is_empty());
         assert_eq!(editor_text(&view, cx), "mine too");
 
-        // Asked again, it is the note on screen that goes.
         keys(cx, "ctrl-shift-backspace");
         assert_eq!(note_texts(dir.path()), ["theirs"]);
         assert_eq!(trashed_texts(dir.path()), ["mine too"]);
@@ -4314,7 +4082,6 @@ pub(crate) mod tests {
         keys(cx, "alt-down");
         let shown = editor_text(&view, cx);
 
-        // Whatever the editor makes of them, looking again changes nothing.
         cx.simulate_input("!");
         keys(cx, "backspace");
         notice_changes(&view, cx);
@@ -4337,8 +4104,6 @@ pub(crate) mod tests {
         assert!(question_is_open(cx));
     }
 
-    /// The one test here with real file events. They arrive on their own thread, so
-    /// it lets the scheduler be woken from outside and waits in real time.
     #[gpui_kit::test]
     fn the_watcher_shows_a_change_while_the_window_stays_in_front(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
@@ -4347,7 +4112,6 @@ pub(crate) mod tests {
         cx.update(|window, cx| view.update(cx, |this, cx| this.watch_notes(window, cx)));
         cx.run_until_parked();
 
-        // As a sync client does: the file arrives beside the notes and moves in.
         let arriving = dir.path().join(".trash/arriving");
         fs::write(&arriving, "theirs").unwrap();
         fs::rename(&arriving, &path).unwrap();
@@ -4366,7 +4130,6 @@ pub(crate) mod tests {
         until_listed(cx, "theirs");
         assert_eq!(editor_text(&view, cx), "theirs");
 
-        // The app's own saves go by the watcher too, and change nothing.
         type_and_save(cx, "ours, ");
         std::thread::sleep(Duration::from_millis(200));
         wait(cx, FOLDER_SETTLE);
@@ -4374,7 +4137,6 @@ pub(crate) mod tests {
         assert_eq!(note_texts(dir.path()), ["ours, theirs"]);
         assert_eq!(cursor(&view, cx), "ours, ".len());
 
-        // Another folder is followed from the moment it is chosen.
         let other = tempfile::tempdir().unwrap();
         cx.update(|window, cx| {
             view.update(cx, |this, cx| {
@@ -4385,9 +4147,6 @@ pub(crate) mod tests {
         until_listed(cx, "there");
     }
 
-    /// Renders every screen to PNGs for a person to review, with no window on the
-    /// desktop and the theme only changed inside this process:
-    /// `BROUYON_SCREENSHOTS=some/folder cargo test screenshots -- --ignored`
     #[test]
     #[ignore = "writes images for visual review"]
     fn screenshots() {
@@ -4431,7 +4190,6 @@ pub(crate) mod tests {
             Arc::new(crate::assets::Assets),
             gpui_kit::platform::current_headless_renderer,
         );
-        // As `main` starts, so that these pictures show what a real window does.
         cx.update(|cx| {
             gpui_omarchy::init(cx);
             init(cx);
@@ -4560,7 +4318,6 @@ pub(crate) mod tests {
             .update(&mut cx, |this, window, cx| this.answer(false, window, cx))
             .unwrap();
 
-        // Each page of the floating window, in its usual size.
         let app = window.update(&mut cx, |_, _, cx| cx.entity()).unwrap();
         let settings = cx
             .open_window(size(px(760.), px(560.)), |window_, cx| {
@@ -4676,9 +4433,6 @@ pub(crate) mod tests {
             })
             .unwrap();
 
-        // The same screen solid and then as glass. Headless draws over black, so
-        // whatever is see-through comes out darker by its alpha. A light theme makes
-        // that easy to measure, and any solid layer left behind shows up as a failure.
         let solid = capture(&mut cx, any_window, &out.join("16-solid.png"));
         cx.update(|cx| cx.global_mut::<Desktop>().transparency = Transparency::Glassy);
         let glassy = capture(&mut cx, any_window, &out.join("17-glassy.png"));
@@ -4699,7 +4453,6 @@ pub(crate) mod tests {
         }
         capture(&mut cx, any_settings, &out.join("18-glassy-settings.png"));
 
-        // A dialog is the one place the solid background can still appear.
         let background = solid.get_pixel(120, 700).0;
         let has_solid_background =
             |image: &image::RgbaImage| image.pixels().any(|pixel| pixel.0 == background);
@@ -4715,8 +4468,6 @@ pub(crate) mod tests {
             .update(&mut cx, |this, window, cx| this.answer(false, window, cx))
             .unwrap();
 
-        // The picture at the top of the README: made-up notes and the default palette,
-        // so it doesn't depend on who runs this or on the current theme.
         let readme_dir = tempfile::tempdir().unwrap();
         for (days_ago, name, text) in [
             (

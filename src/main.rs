@@ -3,7 +3,6 @@
     allow(clippy::disallowed_methods, reason = "#[gpui_kit::test] quits")
 )]
 
-// GPUI macros expand through the canonical `gpui` crate path.
 extern crate gpui_kit as gpui;
 
 mod app;
@@ -29,9 +28,6 @@ use look::MAC;
 use std::io;
 use store::Store;
 
-/// Opens the notes folder. A chosen folder can go away, such as on an unplugged
-/// drive, and the app still has to start so it can be changed: the default folder
-/// stands in for this session, the setting stays, and the message says so.
 fn open_store(config: &mut Config) -> io::Result<(Store, Option<String>)> {
     match Store::open(&config.notes_dir) {
         Ok(store) => Ok((store, None)),
@@ -47,7 +43,6 @@ fn open_store(config: &mut Config) -> io::Result<(Store, Option<String>)> {
     }
 }
 
-/// Everything wrong at launch, as one message for the window to show.
 fn startup_problem(problems: impl IntoIterator<Item = Option<String>>) -> Option<String> {
     let problems: Vec<_> = problems.into_iter().flatten().collect();
     (!problems.is_empty()).then(|| problems.join(" "))
@@ -56,12 +51,9 @@ fn startup_problem(problems: impl IntoIterator<Item = Option<String>>) -> Option
 fn window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         app_id: Some("brouyon".into()),
-        // Hyprland draws the border and handles tiling, so on Linux there is no
-        // title bar. On macOS the window's buttons sit over the top of the list.
         titlebar: title_bar::options(),
         app_owns_titlebar_drag: title_bar::DRAWN,
         window_decorations: Some(WindowDecorations::Server),
-        // Set from the start, so the first frame isn't a solid one.
         window_background: desktop::surface(cx),
         window_min_size: Some(size(px(480.), px(320.))),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -91,7 +83,6 @@ fn main() {
             if MAC {
                 macos::init(cx);
             } else {
-                // What it follows is Omarchy's, which a Mac doesn't have.
                 desktop::follow(cx);
             }
             app::apply_theme(config.theme, cx);
@@ -123,7 +114,6 @@ mod tests {
     use gpui_kit::{TestAppContext, WindowBackgroundAppearance};
     use std::fs;
 
-    /// A Mac has no transparency modes: its sidebar is always tinted over a blur.
     #[gpui_kit::test]
     fn the_window_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
         use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
@@ -158,7 +148,6 @@ mod tests {
     fn a_missing_folder_falls_back_to_the_default_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::for_test(&dir.path().join("default"));
-        // A file where the chosen folder should be makes it impossible to open.
         let blocked = dir.path().join("blocked");
         fs::write(&blocked, "").unwrap();
         config.notes_dir = NotesDir::new(blocked.join("notes"));

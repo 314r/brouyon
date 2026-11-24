@@ -1,6 +1,3 @@
-//! The icons Brouyon draws: the ones every gpui-kit application gets, and the few
-//! more it asks for by name, so the whole Lucide catalog stays out of the binary.
-
 use gpui_kit::{AssetSource, Result, SharedString, assets::icon_assets};
 use std::borrow::Cow;
 
@@ -30,7 +27,6 @@ mod tests {
     use super::*;
     use gpui_omarchy::IconName;
 
-    /// An icon missing from the bundle draws nothing, and nothing says so.
     #[test]
     fn every_icon_the_app_draws_is_in_the_bundle() {
         for name in [

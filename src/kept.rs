@@ -1,9 +1,5 @@
-//! What it takes to let go of the text in the editor. Whatever replaces the text, or
-//! leaves it, takes a value from here that only a save gives.
-
 use gpui_kit::{App, Window};
 
-/// What became of the text in the editor since it was last in step with its file.
 #[derive(Default)]
 pub struct SaveState(State);
 
@@ -12,7 +8,6 @@ enum State {
     #[default]
     Kept,
     Pending,
-    /// A save failed, and the window says so.
     Refused,
 }
 
@@ -25,7 +20,6 @@ pub struct Kept(());
 pub struct Warned(());
 
 impl SaveState {
-    /// A text that couldn't be saved hasn't been since, whatever was typed.
     pub fn changed(&mut self) {
         if self.0 == State::Kept {
             self.0 = State::Pending;
@@ -50,7 +44,6 @@ impl SaveState {
     }
 }
 
-/// The app, or the window that holds the text, may go.
 #[must_use]
 pub struct MayLeave(());
 
@@ -78,7 +71,6 @@ impl MayLeave {
     }
 }
 
-/// Quits once no window is left to hold a text.
 #[expect(clippy::disallowed_methods, reason = "there is no text")]
 pub fn quit_without_windows(cx: &App) {
     if cx.windows().is_empty() {
@@ -86,7 +78,6 @@ pub fn quit_without_windows(cx: &App) {
     }
 }
 
-/// Closes a window that never holds a text.
 #[expect(clippy::disallowed_methods, reason = "there is no text")]
 pub fn close_textless(window: &mut Window) {
     window.remove_window();

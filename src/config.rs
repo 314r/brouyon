@@ -1,5 +1,3 @@
-//! User settings in `config.toml`.
-
 use crate::{
     checked::{IdleDelay, NotesDir, TextPercent, TextScale},
     store::write_atomically,
@@ -18,7 +16,6 @@ const BASE_REM_SIZE: f32 = 16.;
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
-    /// Follows the desktop's theme and its changes.
     #[default]
     Omarchy,
     Light,
@@ -35,14 +32,11 @@ impl ThemeMode {
     }
 }
 
-/// What the copy button puts on the clipboard.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CopyFormat {
-    /// The note as it is written.
     #[default]
     Markdown,
-    /// The note without the Markdown that styles it.
     Text,
 }
 
@@ -56,7 +50,6 @@ impl CopyFormat {
         }
     }
 
-    /// As it reads after "Copy as" and "Copied as".
     pub fn label(self) -> &'static str {
         match self {
             CopyFormat::Markdown => "Markdown",
@@ -67,16 +60,12 @@ impl CopyFormat {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// The file these settings are saved to.
     path: PathBuf,
     pub default_notes_dir: NotesDir,
     pub notes_dir: NotesDir,
-    /// How long without activity before moving to a blank note. `None` disables it.
     pub idle: Option<IdleDelay>,
     pub theme: ThemeMode,
-    /// Scales the desktop's text size throughout the app.
     pub text_percent: TextPercent,
-    /// The format last chosen for copying a note, which the button uses again.
     pub copy_as: CopyFormat,
 }
 
@@ -91,8 +80,6 @@ struct FileConfig {
 }
 
 impl Config {
-    /// Reads `$XDG_CONFIG_HOME/brouyon/config.toml`. Defaults apply when it is
-    /// missing or invalid, and what's wrong with an invalid one comes back to be shown.
     pub fn load() -> (Self, Option<String>) {
         let home = home_dir();
         let path = xdg_dir("XDG_CONFIG_HOME", ".config", &home).join("brouyon/config.toml");
@@ -107,8 +94,6 @@ impl Config {
 
     fn resolve(file: FileConfig, path: PathBuf, data_home: &Path, home: &Path) -> Self {
         let default_notes_dir = NotesDir::new(data_home.join("brouyon"));
-        // Joining leaves an absolute folder as it is and puts any other under home,
-        // so notes never land in whichever folder the app was launched from.
         let notes_dir = file
             .notes_dir
             .filter(|dir| !dir.is_empty())
@@ -136,8 +121,6 @@ impl Config {
         }
     }
 
-    /// Settings for a test, saved inside `notes_dir` under a folder that notes
-    /// never list, so nothing reaches the real configuration.
     #[cfg(test)]
     pub fn for_test(notes_dir: &Path) -> Self {
         Self {
@@ -156,13 +139,10 @@ impl Config {
         fs::read_to_string(&self.path).unwrap_or_default()
     }
 
-    /// The window's rem size for the desktop's text size and the chosen scale.
     pub fn rem_px(&self, desktop_text_scale: TextScale) -> f32 {
         BASE_REM_SIZE * desktop_text_scale.get() * self.text_percent.get() as f32 / 100.
     }
 
-    /// Each setter applies for this session even when saving fails, and returns
-    /// that failure for the app to report.
     pub fn set_theme(&mut self, theme: ThemeMode) -> io::Result<()> {
         self.theme = theme;
         self.save("theme", Some(theme.key().into()))
@@ -189,7 +169,6 @@ impl Config {
         self.save("idle_minutes", Some(value))
     }
 
-    /// `None` goes back to the default folder.
     pub fn set_notes_dir(&mut self, dir: Option<NotesDir>) -> io::Result<()> {
         self.notes_dir = dir
             .clone()
@@ -205,11 +184,7 @@ impl Config {
         self.save("notes_dir", value)
     }
 
-    /// Changes one key and leaves the rest of the file as it is, comments
-    /// included. A file the app couldn't read back is reported and never replaced.
     fn save(&self, key: &str, value: Option<toml_edit::Value>) -> io::Result<()> {
-        // Where a link leads, so that a file kept elsewhere, such as in a dotfiles
-        // repository, is the one rewritten, rather than the link being replaced.
         let path = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
@@ -221,7 +196,6 @@ impl Config {
             .map_err(|error| invalid(&self.path, error))?;
         match value {
             Some(mut value) => {
-                // The comment after a value belongs to the value.
                 if let Some(previous) = document.get(key).and_then(|item| item.as_value()) {
                     *value.decor_mut() = previous.decor().clone();
                 }
@@ -241,7 +215,6 @@ impl Config {
     }
 }
 
-/// The settings in `path`, or the defaults and what went wrong. A missing file is fine.
 fn read_file_config(path: &Path) -> (FileConfig, Option<String>) {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -301,7 +274,6 @@ mod tests {
         Config::load_from(path.into(), Path::new("/data"), Path::new("/home/me"))
     }
 
-    /// The defaults, which have a test of their own, with `path` for their file.
     fn defaults(path: &Path) -> Config {
         Config {
             path: path.into(),
@@ -309,7 +281,6 @@ mod tests {
         }
     }
 
-    /// Settings saved to a real file in a temporary folder.
     fn in_temp_dir(contents: Option<&str>) -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("brouyon/config.toml");
@@ -325,7 +296,6 @@ mod tests {
         fs::read_to_string(&config.path).unwrap()
     }
 
-    /// What the app would read from the file at its next launch.
     fn reloaded(config: &Config) -> Config {
         let file = toml::from_str(&saved(config)).unwrap();
         Config::resolve(
@@ -470,7 +440,6 @@ mod tests {
     #[test]
     fn a_settings_file_that_cannot_be_opened_is_a_problem_too() {
         let dir = tempfile::tempdir().unwrap();
-        // A folder where the file should be fails with something other than "not found".
         let (config, problem) = load(dir.path());
         assert_eq!(config, defaults(dir.path()));
         assert!(problem.unwrap().contains("default settings"));

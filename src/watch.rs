@@ -1,6 +1,3 @@
-//! Noticing what other programs change in the folders Brouyon reads: the desktop's
-//! settings, and the notes themselves, which a sync client can change at any time.
-
 use crate::store::TEMP_PREFIX;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
@@ -10,12 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Watches folders rather than files, so atomic saves and replaced folders survive.
 /// Adapted from gpui-omarchy's palette watcher, which is private to that crate.
 pub struct FolderWatcher {
     watcher: RecommendedWatcher,
     armed: BTreeMap<PathBuf, Identity>,
-    /// Whether to watch around the folders too, to see them replaced or created.
     parents: bool,
 }
 
@@ -24,8 +19,6 @@ pub struct FolderWatcher {
 type Identity = (u64, u64);
 
 impl FolderWatcher {
-    /// Watches `folders`, and sends on the channel when something in them changes.
-    ///
     /// With `parents`, a folder's parent is watched too, which sees it being
     /// replaced, and so is the nearest ancestor of a missing one, which sees it
     /// appear. That suits small folders that come and go. It doesn't suit the notes:
@@ -34,7 +27,6 @@ impl FolderWatcher {
         folders: &[PathBuf],
         parents: bool,
     ) -> notify::Result<(Self, async_channel::Receiver<()>)> {
-        // One waiting event is enough, because each one reloads everything.
         let (sender, receiver) = async_channel::bounded(1);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if !matches!(&event, Ok(event) if is_noise(event)) {
@@ -50,8 +42,6 @@ impl FolderWatcher {
         Ok((watcher, receiver))
     }
 
-    /// Watches `folders` as they are now. To call again after a change, which may
-    /// have replaced one of them.
     pub fn arm(&mut self, folders: &[PathBuf]) {
         let mut wanted = BTreeMap::new();
         for folder in folders {
@@ -91,8 +81,6 @@ impl FolderWatcher {
     }
 }
 
-/// Reading a watched file reports an access, which must not cause another read.
-/// Nor must a save in progress, which only becomes a change once it is renamed.
 fn is_noise(event: &notify::Event) -> bool {
     let saving = |path: &PathBuf| {
         path.file_name()
@@ -110,7 +98,6 @@ fn add_folder(path: &Path, folders: &mut BTreeMap<PathBuf, Identity>) {
     }
 }
 
-/// Real file events arrive on their own thread, so tests of them wait in real time.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::{
@@ -118,7 +105,6 @@ pub(crate) mod testing {
         time::{Duration, Instant},
     };
 
-    /// Longer than a burst of events takes to arrive.
     pub(crate) const QUIET: Duration = Duration::from_millis(100);
 
     pub(crate) fn wait_for_event(events: &async_channel::Receiver<()>) {
@@ -129,7 +115,6 @@ pub(crate) mod testing {
         }
     }
 
-    /// Lets a burst of events finish and forgets them.
     pub(crate) fn settle(events: &async_channel::Receiver<()>) {
         thread::sleep(QUIET);
         while events.try_recv().is_ok() {}
@@ -146,7 +131,6 @@ mod tests {
     use super::{testing::*, *};
     use crate::{checked::NotesDir, store::Store};
 
-    /// A notes folder inside a temporary one, as a notes folder is inside Dropbox.
     fn notes() -> (tempfile::TempDir, Store, PathBuf) {
         let outside = tempfile::tempdir().unwrap();
         let dir = outside.path().join("notes");
@@ -163,7 +147,6 @@ mod tests {
     #[test]
     fn a_note_renamed_into_place_is_noticed() {
         let (outside, store, dir) = notes();
-        // What a sync client does: the file arrives elsewhere and moves in.
         let arriving = outside.path().join("arriving");
         fs::write(&arriving, "from another device").unwrap();
         let (_watcher, events) = watch(&store);
