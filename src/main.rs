@@ -12,7 +12,7 @@ mod config;
 mod desktop;
 mod kept;
 mod lists;
-#[cfg(target_os = "macos")]
+mod look;
 mod macos;
 mod markdown;
 mod settings;
@@ -24,6 +24,7 @@ mod watch;
 use app::Brouyon;
 use config::Config;
 use gpui_kit::{App, AppContext, Bounds, WindowBounds, WindowDecorations, WindowOptions, px, size};
+use look::MAC;
 use std::io;
 use store::Store;
 
@@ -86,11 +87,12 @@ fn main() {
         .run(move |cx| {
             gpui_omarchy::init(cx);
             app::init(cx);
-            #[cfg(target_os = "macos")]
-            macos::init(cx);
-            // What it follows is Omarchy's, which a Mac doesn't have.
-            #[cfg(not(target_os = "macos"))]
-            desktop::follow(cx);
+            if MAC {
+                macos::init(cx);
+            } else {
+                // What it follows is Omarchy's, which a Mac doesn't have.
+                desktop::follow(cx);
+            }
             app::apply_theme(config.theme, cx);
             let options = window_options(cx);
             cx.open_window(options, |window, cx| {
@@ -102,8 +104,9 @@ fn main() {
                         startup_problem([config_problem, folder_problem]).map(Into::into);
                     brouyon
                 });
-                #[cfg(target_os = "macos")]
-                macos::follow_appearance(&brouyon, window, cx);
+                if MAC {
+                    macos::follow_appearance(&brouyon, window, cx);
+                }
                 brouyon
             })
             .expect("open window");
@@ -119,34 +122,19 @@ mod tests {
     use std::fs;
 
     /// A Mac has no transparency modes: its sidebar is always tinted over a blur.
-    #[cfg(target_os = "macos")]
-    #[gpui_kit::test]
-    fn the_window_opens_over_a_blur_whatever_the_mode(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            desktop::init(cx);
-            for mode in [Transparency::Opaque, Transparency::Glassy] {
-                cx.global_mut::<Desktop>().transparency = mode;
-                assert_eq!(
-                    window_options(cx).window_background,
-                    WindowBackgroundAppearance::Blurred
-                );
-            }
-        });
-    }
-
-    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn the_window_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
+        use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
         cx.update(|cx| {
             desktop::init(cx);
             assert_eq!(
                 window_options(cx).window_background,
-                WindowBackgroundAppearance::Opaque
+                if MAC { Blurred } else { Opaque }
             );
             cx.global_mut::<Desktop>().transparency = Transparency::Glassy;
             assert_eq!(
                 window_options(cx).window_background,
-                WindowBackgroundAppearance::Transparent
+                if MAC { Blurred } else { Transparent }
             );
         });
     }

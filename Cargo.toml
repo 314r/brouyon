@@ -7,6 +7,10 @@ license = "MIT"
 authors = ["Pierre Svaert (314r)"]
 repository = "https://github.com/314r/brouyon"
 
+[features]
+# What a Mac shows, its keys and its labels, on any system: `cargo test --features mac-look`.
+mac-look = []
+
 [dependencies]
 # Pinned to a fork's commit until huacnlee/gpui-omarchy#24, which rounds corners
 # like Hyprland's windows, is merged; then back to upstream. No release built on

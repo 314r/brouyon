@@ -9,6 +9,7 @@ use crate::{
     },
     desktop::{self, Desktop},
     kept,
+    look::MAC,
     shortcuts::primary,
     title_bar::{self, BAR_HEIGHT, TitleBar},
 };
@@ -47,25 +48,22 @@ pub fn bind_keys(cx: &mut App) {
 
 /// The theme that follows the desktop's. A Mac has no Omarchy, so there it follows
 /// the system's light or dark appearance.
-#[cfg(not(target_os = "macos"))]
-const DESKTOP_THEME: &str = "Omarchy";
-#[cfg(target_os = "macos")]
-const DESKTOP_THEME: &str = "System";
+const DESKTOP_THEME: &str = if MAC { "System" } else { "Omarchy" };
 
-#[cfg(not(target_os = "macos"))]
-const THEME_HELP: &str = "Omarchy follows the current desktop theme and its changes. Light and \
-     Dark only set the colours: window transparency, the corners, the font and the text size \
-     still follow the desktop.";
-#[cfg(target_os = "macos")]
-const THEME_HELP: &str = "System follows macOS between light and dark as it changes. Light and \
-     Dark stay put.";
+const THEME_HELP: &str = if MAC {
+    "System follows macOS between light and dark as it changes. Light and Dark stay put."
+} else {
+    "Omarchy follows the current desktop theme and its changes. Light and Dark only set the \
+     colours: window transparency, the corners, the font and the text size still follow the \
+     desktop."
+};
 
-#[cfg(not(target_os = "macos"))]
-const TEXT_SIZE_HELP: &str = "Scales the desktop's text size throughout Brouyon. In the main \
-     window, Ctrl+Plus, Ctrl+Minus and Ctrl+0 do the same.";
-#[cfg(target_os = "macos")]
-const TEXT_SIZE_HELP: &str = "Scales the text throughout Brouyon. In the main window, ⌘+, ⌘− \
-     and ⌘0 do the same.";
+const TEXT_SIZE_HELP: &str = if MAC {
+    "Scales the text throughout Brouyon. In the main window, ⌘+, ⌘− and ⌘0 do the same."
+} else {
+    "Scales the desktop's text size throughout Brouyon. In the main window, Ctrl+Plus, \
+     Ctrl+Minus and Ctrl+0 do the same."
+};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -721,7 +719,7 @@ mod tests {
         let (_dir, view, cx) = open(cx);
         let options = cx.update(|_, cx| window_options(view.read(cx).config(), cx));
         // A floating window on macOS is a panel that stays above every other window.
-        let kind = if cfg!(target_os = "macos") {
+        let kind = if MAC {
             WindowKind::Normal
         } else {
             WindowKind::Floating
@@ -730,31 +728,16 @@ mod tests {
         assert_eq!(options.app_id.as_deref(), Some("brouyon-settings"));
     }
 
-    #[cfg(target_os = "macos")]
-    #[gpui_kit::test]
-    fn it_opens_over_a_blur_whatever_the_mode(cx: &mut TestAppContext) {
-        let (_dir, view, cx) = open(cx);
-        for mode in [Transparency::Opaque, Transparency::Glassy] {
-            cx.update(|_, cx| cx.global_mut::<Desktop>().transparency = mode);
-            let surface =
-                cx.update(|_, cx| window_options(view.read(cx).config(), cx).window_background);
-            assert_eq!(surface, gpui_kit::WindowBackgroundAppearance::Blurred);
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
     #[gpui_kit::test]
     fn it_opens_with_the_surface_of_the_mode(cx: &mut TestAppContext) {
+        use gpui_kit::WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
         let (_dir, view, cx) = open(cx);
         let surface = |cx: &mut VisualTestContext| {
             cx.update(|_, cx| window_options(view.read(cx).config(), cx).window_background)
         };
-        assert_eq!(surface(cx), gpui_kit::WindowBackgroundAppearance::Opaque);
+        assert_eq!(surface(cx), if MAC { Blurred } else { Opaque });
         cx.update(|_, cx| cx.global_mut::<Desktop>().transparency = Transparency::Glassy);
-        assert_eq!(
-            surface(cx),
-            gpui_kit::WindowBackgroundAppearance::Transparent
-        );
+        assert_eq!(surface(cx), if MAC { Blurred } else { Transparent });
     }
 
     #[gpui_kit::test]

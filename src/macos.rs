@@ -1,6 +1,7 @@
 //! What a Mac expects of an app besides its window: a menu bar, the keys that hide
 //! and minimise, a theme that follows the system's light or dark appearance, and
-//! quitting once the window is closed.
+//! quitting once the window is closed. It compiles everywhere, with something to stand
+//! in for what only a Mac can answer.
 
 use crate::{
     app::{
@@ -13,8 +14,8 @@ use crate::{
 };
 use gpui_kit::base::ThemeAppearance;
 use gpui_kit::{
-    App, Entity, Hsla, KeyBinding, Menu, MenuItem, OsAction, Rgba, SystemMenuType, Window,
-    base::input as editor, px,
+    App, Entity, Hsla, KeyBinding, Menu, MenuItem, OsAction, Pixels, Point, Rgba, SystemMenuType,
+    Window, base::input as editor, px,
 };
 use gpui_omarchy::Theme;
 
@@ -94,6 +95,7 @@ pub fn sidebar_opacity(theme: &Theme) -> f32 {
 /// The accent colour chosen under System Settings > Appearance, in place of the
 /// theme's, for whatever the theme marks with it. None if macOS doesn't give one in
 /// sRGB.
+#[cfg(target_os = "macos")]
 pub fn system_accent() -> Option<Hsla> {
     use objc2_app_kit::{NSColor, NSColorSpace};
     let accent =
@@ -107,6 +109,18 @@ pub fn system_accent() -> Option<Hsla> {
         }
         .into(),
     )
+}
+
+/// The blue that a Mac starts with.
+#[cfg(not(target_os = "macos"))]
+pub fn system_accent() -> Option<Hsla> {
+    let blue = Rgba {
+        r: 0.,
+        g: 0.478,
+        b: 1.,
+        a: 1.,
+    };
+    Some(blue.into())
 }
 
 /// Paints the theme just applied with the system's accent. The text on it is white,
@@ -131,6 +145,7 @@ pub fn use_system_accent(cx: &mut App) {
 /// leaving full screen can leave that copy saying the window is in the background
 /// while it's in front. Windows without a native one, such as the tests', fall back
 /// on GPUI's.
+#[cfg(target_os = "macos")]
 pub fn is_key_window(window: &Window) -> bool {
     use objc2_app_kit::NSView;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -144,6 +159,30 @@ pub fn is_key_window(window: &Window) -> bool {
     // thread, where GPUI draws.
     let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
     view.window().is_some_and(|window| window.isKeyWindow())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_key_window(window: &Window) -> bool {
+    window.is_window_active()
+}
+
+/// Moves the window's close, minimise and zoom buttons, which only a Mac draws.
+pub fn place_buttons(at: Point<Pixels>, window: &Window) {
+    #[cfg(target_os = "macos")]
+    window.set_traffic_light_position(at);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (at, window);
+}
+
+/// Of the keys that gpui-base's editor only has on a Mac, those that tests press.
+#[cfg(test)]
+pub fn bind_editor_keys(cx: &mut App) {
+    if crate::look::MAC && cfg!(not(target_os = "macos")) {
+        cx.bind_keys([
+            KeyBinding::new("cmd-a", editor::SelectAll, Some("Input")),
+            KeyBinding::new("cmd-z", editor::Undo, Some("Input")),
+        ]);
+    }
 }
 
 /// How round macOS 26 makes a window with no toolbar, such as Brouyon's.

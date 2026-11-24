@@ -3,13 +3,14 @@
 //! empty parts move the window. On Linux, Hyprland places and moves windows, so none
 //! of this does anything there.
 
+use crate::{look::MAC, macos};
 use gpui_kit::{
     Div, MouseButton, Pixels, Point, TitlebarOptions, Window, div, point, prelude::*, px,
 };
 use std::{cell::Cell, rc::Rc};
 
 /// Whether the app draws the title bar, rather than the desktop or no one.
-pub const DRAWN: bool = cfg!(target_os = "macos");
+pub const DRAWN: bool = MAC;
 
 /// The height of the bars along the windows' top, and the main window's bottom, in
 /// rems.
@@ -48,7 +49,6 @@ fn buttons_at(bar_height: Pixels) -> Point<Pixels> {
 #[derive(Default)]
 pub struct TitleBar {
     /// Where the buttons were last put.
-    #[cfg(target_os = "macos")]
     placed: Option<Point<Pixels>>,
     /// The left button went down on an empty part of the bar, and the pointer
     /// hasn't moved since.
@@ -59,16 +59,11 @@ impl TitleBar {
     /// Keeps the buttons in the middle of a bar this tall, which grows and shrinks
     /// with the text size.
     pub fn place_buttons(&mut self, bar_height: Pixels, window: &Window) {
-        #[cfg(target_os = "macos")]
-        {
-            let wanted = buttons_at(bar_height);
-            if self.placed != Some(wanted) {
-                self.placed = Some(wanted);
-                window.set_traffic_light_position(wanted);
-            }
+        let wanted = buttons_at(bar_height);
+        if self.placed != Some(wanted) {
+            self.placed = Some(wanted);
+            macos::place_buttons(wanted, window);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (bar_height, window);
     }
 
     /// How much of the bar's left the buttons take, with room after them. None where

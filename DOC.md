@@ -163,8 +163,9 @@ what a Mac expects of an app:
 bin/test
 ```
 
-This runs the tests, then checks that `THIRD-PARTY-LICENSES.txt` still matches
-`Cargo.lock`. After a dependency change, rewrite that file with `bin/licenses`.
+This runs the tests, with Linux's look and then with a Mac's, and checks that
+`THIRD-PARTY-LICENSES.txt` still matches `Cargo.lock`. After a dependency change, rewrite
+that file with `bin/licenses`.
 
 Run the app on throwaway notes and settings, kept in `/tmp/brouyon-dev`, so it doesn't
 touch your real ones. It still follows your real theme and transparency, which it only
@@ -184,6 +185,9 @@ This also checks that the see-through parts really are, and writes `readme.png`,
 picture at the top of this page (`screenshots/markdown-note.png`). Those checks were written
 against Linux's renderer.
 
-Code for macOS is only compiled on a Mac. The workflow in `.github/workflows/macos.yml`
-builds and tests it on every push. `tools/macos-icon` rewrites `macos/brouyon.icns`, the
-app's icon there, from `macos/brouyon.svg`, and needs `rsvg-convert`.
+What a Mac shows, its keys and its labels compile on Linux too: code and tests ask
+`look::MAC`, which `cargo test --features mac-look` makes true there. Only the calls to
+macOS itself, in `src/macos.rs`, need a Mac. The workflow in `.github/workflows/macos.yml`
+builds and tests Brouyon on a Mac at every push. `tools/macos-icon` rewrites
+`macos/brouyon.icns`, the app's icon there, from `macos/brouyon.svg`, and needs
+`rsvg-convert`.

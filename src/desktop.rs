@@ -4,10 +4,11 @@
 //!
 //! A Mac has no Omarchy to follow, so there only the solid, unscaled default is used,
 //! and the rest only by the tests.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use crate::{
     config::{home_dir, xdg_dir},
+    look::MAC,
+    macos,
     watch::FolderWatcher,
 };
 use gpui_kit::{
@@ -105,7 +106,7 @@ impl Desktop {
 /// What the windows show behind their root: the transparency mode's surface, or on a
 /// Mac, the blur its sidebars are tinted over.
 pub fn surface(cx: &App) -> WindowBackgroundAppearance {
-    if cfg!(target_os = "macos") {
+    if MAC {
         WindowBackgroundAppearance::Blurred
     } else {
         cx.global::<Desktop>().transparency.surface()
@@ -117,23 +118,19 @@ pub fn surface(cx: &App) -> WindowBackgroundAppearance {
 /// Mac, what the root shows is the sidebar, and [`content_background`] keeps the
 /// rest solid.
 pub fn root_background(window: &Window, cx: &App) -> Hsla {
-    #[cfg(target_os = "macos")]
-    let alpha = {
-        let _ = window;
-        crate::macos::sidebar_opacity(cx.omarchy())
+    let alpha = if MAC {
+        macos::sidebar_opacity(cx.omarchy())
+    } else {
+        let transparency = cx.global::<Desktop>().transparency;
+        transparency.alpha(window.is_window_active())
     };
-    #[cfg(not(target_os = "macos"))]
-    let alpha = cx
-        .global::<Desktop>()
-        .transparency
-        .alpha(window.is_window_active());
     cx.omarchy().background.opacity(alpha)
 }
 
 /// The background of what sits beside a window's sidebar: none, so the root's shows,
 /// except on a Mac, where only the sidebar is see-through.
 pub fn content_background(cx: &App) -> Hsla {
-    if cfg!(target_os = "macos") {
+    if MAC {
         cx.omarchy().background
     } else {
         transparent_black()

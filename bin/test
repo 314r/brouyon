@@ -6,5 +6,7 @@ set -eu
 
 cd "$(dirname "$0")/.."
 cargo test "$@"
+# Again with what a Mac shows, which Linux can draw too.
+cargo test --features mac-look "$@"
 python3 tools/third-party-licenses --check
 tools/lint

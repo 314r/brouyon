@@ -1,4 +1,4 @@
-# Builds and tests Brouyon on macOS, whose code Linux never compiles.
+# Builds and tests Brouyon on macOS, whose native code Linux never compiles.
 name: macOS
 
 on:
