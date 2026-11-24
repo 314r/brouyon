@@ -1,0 +1,23 @@
+Mistake: before 3a26ceb, text that an input method composed was never saved
+Run: verify/check --drift
+Says: follow_editor changed
+Run: cargo test --locked --quiet composed_text
+Says: composed_text_is_saved_when_leaving_the_note --- FAILED
+
+diff --git i/src/app.rs w/src/app.rs
+index a60b56b..1c29998 100644
+--- i/src/app.rs
++++ w/src/app.rs
+@@ -451,7 +451,11 @@ impl Brouyon {
+         cx: &mut Context<Self>,
+     ) -> [Subscription; 2] {
+         [
+-            cx.observe_in(editor, window, Self::on_editor_notify),
++            cx.subscribe_in(editor, window, |this, editor, event, window, cx| {
++                if matches!(event, InputEvent::Change) {
++                    this.on_editor_notify(editor.clone(), window, cx);
++                }
++            }),
+             cx.subscribe_in(editor, window, Self::on_editor_event),
+         ]
+     }

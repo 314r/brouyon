@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""Checks NothingLost.tla with TLC, and that the code it describes hasn't moved on.
+
+    check                   everything, in about a minute on 16 cores
+    check --drift           only whether the covered code changed
+    check --trace CASE RULE how CASE breaks RULE, step by step
+    check --config CASE     the TLC config of CASE, to read it with /statechart
+
+    check --confirm         records the covered code as it is now, once the model describes it
+
+Exit status: 0 when all is as recorded, 1 when a rule, a finding or a deliberate
+mistake isn't, 2 when the covered code changed since it was last confirmed.
+"""
+
+import argparse
+import concurrent.futures
+import hashlib
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = Path(
+    subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+)
+
+JAVA = "java@temurin-25.0.5.1+2.0.LTS"
+TLC_URL = "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+TLC_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+
+# What each rule promises, for a person to read.
+RULES = {
+    "SaveKeepsTheirs": "A save never replaces text that was written elsewhere and not seen here.",
+    "RemoveKeepsTheirs": "Emptying a note never deletes text that was written elsewhere and not seen here.",
+    "CreateKeepsTheirs": "A new note never takes the place of another note's file.",
+    "TrashKeepsTheirs": "Moving a note to the Trash never replaces a note already there.",
+    "RestoreKeepsTheirs": "Restoring a note never replaces a note in the folder.",
+    "PurgeKeepsTheirs": "Delete forever only deletes the text that was on screen.",
+    "LeavingKeepsMine": "Leaving a note never drops text that isn't in a file.",
+    "RefreshKeepsMine": "A change made elsewhere never replaces text that isn't in a file.",
+    "ConflictKeepsMine": "A conflict never drops the text typed here.",
+    "QuittingKeepsMine": "Quitting never drops text that isn't in a file, unless it said it couldn't save.",
+}
+ALSO = ["TypeOK", "LoadedIsShown", "TrashIsReadOnly"]
+
+TODAY = {"GapIsQuiet": False, "TrashIsQuiet": False}
+QUIET = {"GapIsQuiet": True, "TrashIsQuiet": True}
+
+
+def case(breaks=(), lift=None, broken=None, past=None, names=2, texts=2):
+    """`past` is the commit that fixed the mistake: it was in the code before it."""
+    switches = dict(QUIET)
+    if lift:
+        switches[lift] = False
+    return {"breaks": list(breaks), "switches": switches, "broken": broken, "past": past,
+            "names": names, "texts": texts}
+
+
+CASES = {
+    # Everything but the findings.
+    "promise": case(names=3, texts=3),
+    # The findings. Each is the code as it stands, with the other one set aside.
+    "finding-gap": case(
+        ["SaveKeepsTheirs", "RemoveKeepsTheirs", "CreateKeepsTheirs",
+         "TrashKeepsTheirs", "RestoreKeepsTheirs"], lift="GapIsQuiet"),
+    "finding-purge": case(["PurgeKeepsTheirs"], lift="TrashIsQuiet", texts=3),
+    # Mistakes that were in the code. Each has to be caught again.
+    "mistake-save-skips-its-check": case(
+        ["SaveKeepsTheirs"], broken="save-skips-its-check", past="a1a7ee2"),
+    "mistake-remove-skips-its-check": case(
+        ["RemoveKeepsTheirs"], broken="remove-skips-its-check", past="a1a7ee2"),
+    "mistake-quit-ignores-a-failed-save": case(
+        ["QuittingKeepsMine"], broken="quit-ignores-a-failed-save", past="25a48ef"),
+    "mistake-any-problem-counts-as-a-warning": case(
+        ["QuittingKeepsMine"], broken="any-problem-counts-as-a-warning", past="25a48ef"),
+    "mistake-composing-goes-unnoticed": case(
+        ["LeavingKeepsMine", "RefreshKeepsMine", "QuittingKeepsMine"],
+        broken="composing-goes-unnoticed", past="3a26ceb", texts=3),
+    # Mistakes nobody has made yet, for the rules the others don't reach.
+    "mistake-create-takes-any-name": case(["CreateKeepsTheirs"], broken="create-takes-any-name"),
+    "mistake-trash-takes-any-name": case(["TrashKeepsTheirs"], broken="trash-takes-any-name"),
+    "mistake-restore-takes-any-name": case(["RestoreKeepsTheirs"], broken="restore-takes-any-name"),
+    "mistake-conflict-takes-theirs": case(["ConflictKeepsMine"], broken="conflict-takes-theirs"),
+    "mistake-refresh-ignores-dirty": case(["RefreshKeepsMine"], broken="refresh-ignores-dirty"),
+    "mistake-refresh-only-remembers": case(["SaveKeepsTheirs"], broken="refresh-only-remembers"),
+    "mistake-select-ignores-a-failed-save": case(["LeavingKeepsMine"], broken="select-ignores-a-failed-save"),
+    "mistake-failed-save-counts-as-saved": case(["LeavingKeepsMine"], broken="failed-save-counts-as-saved"),
+    "mistake-quit-without-saving": case(["QuittingKeepsMine"], broken="quit-without-saving"),
+}
+
+
+# --- TLC -------------------------------------------------------------------
+
+
+def tlc_jar():
+    jar = ROOT / "target/verify/tla2tools-1.7.4.jar"
+    if not jar.exists():
+        print(f"Downloading TLC to {jar.relative_to(ROOT)}", file=sys.stderr)
+        jar.parent.mkdir(parents=True, exist_ok=True)
+        part = jar.with_suffix(".part")
+        urllib.request.urlretrieve(TLC_URL, part)
+        part.rename(jar)
+    if hashlib.sha256(jar.read_bytes()).hexdigest() != TLC_SHA256:
+        sys.exit(f"{jar} isn't the TLC this was written for. Delete it and run this again.")
+    return jar
+
+
+def config_of(settings, rules, symmetry=True):
+    switches = settings["switches"]
+    broken = f'{{"{settings["broken"]}"}}' if settings["broken"] else "{}"
+    names = ", ".join(f"n{i + 1}" for i in range(settings["names"]))
+    texts = ", ".join(f"t{i + 1}" for i in range(settings["texts"]))
+    return "\n".join([
+        "SPECIFICATION Spec", "CONSTANTS",
+        f"  Names = {{{names}}}", f"  Texts = {{{texts}}}",
+        "  None = None", "  Empty = Empty",
+        *(f"  {name} = {str(value).upper()}" for name, value in switches.items()),
+        f"  Broken = {broken}",
+        *(["SYMMETRY Symmetry"] if symmetry else []),
+        "INVARIANTS " + " ".join(rules), ""])
+
+
+def tlc(jar, settings, rules, workers="auto", coverage=False):
+    """Runs TLC, and returns the rule it found broken, if any, and its output."""
+    with tempfile.TemporaryDirectory(prefix="nothing-lost-") as work:
+        work = Path(work)
+        (work / "NothingLost.tla").write_text((HERE / "NothingLost.tla").read_text())
+        (work / "run.cfg").write_text(config_of(settings, rules))
+        command = ["mise", "exec", JAVA, "--", "java", "-XX:+UseParallelGC",
+                   f"-Djava.io.tmpdir={work}", "-cp", str(jar), "tlc2.TLC",
+                   "-workers", str(workers), "-metadir", str(work / "states"),
+                   "-config", "run.cfg"]
+        if coverage:
+            command += ["-coverage", "1"]
+        ran = subprocess.run(command + ["NothingLost.tla"], cwd=work, text=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    found = re.search(r"Invariant (\w+) is violated", ran.stdout)
+    if not found and "No error has been found" not in ran.stdout:
+        sys.exit(f"TLC failed:\n{ran.stdout[-3000:]}")
+    return (found.group(1) if found else None), ran.stdout
+
+
+def states(output):
+    found = re.findall(r"([\d,]+) distinct states found", output)
+    return found[-1] if found else "?"
+
+
+# --- Telling a counterexample ----------------------------------------------
+
+
+def parse_trace(output):
+    steps = []
+    for block in re.split(r"\nState \d+: ", output)[1:]:
+        head, _, rest = block.partition("\n")
+        action = re.match(r"<(\w+)", head).group(1)
+        # TLC breaks a long value over several lines.
+        values = {name: " ".join(value.split()) for name, value in re.findall(
+            r"/\\ (\w+) = (.*?)(?=\n/\\ |\Z)", rest.split("\n\n")[0], re.S)}
+        steps.append((action, values))
+    return steps
+
+
+def files(value):
+    return dict(re.findall(r"(\w+) :> (\w+)", value))
+
+
+def place(value):
+    kind = re.search(r'kind \|-> "(\w+)"', value).group(1)
+    name = re.search(r"id \|-> (\w+)", value).group(1)
+    return "a blank note" if kind == "blank" else f"{'trashed note' if kind == 'trashed' else 'note'} {name}"
+
+
+def ident(value):
+    return re.search(r"id \|-> (\w+)", value).group(1)
+
+
+def target(values):
+    return place(re.search(r"target \|-> (\[[^]]*\])", values["handler"]).group(1))
+
+
+def does(values):
+    return re.search(r'does \|-> "(\w+)"', values["handler"]).group(1)
+
+
+def told(action, before, after):
+    """One step of a counterexample, in the code's words."""
+    def changed(folder):
+        was, now = files(before[folder]), files(after[folder])
+        return [(n, now[n]) for n in now if was[n] != now[n]]
+
+    selection = place(after["selection"]) if "selection" in after else "?"
+    if action == "Init":
+        return "Brouyon is open on a blank note. The folders are empty."
+    if action == "Type":
+        return f"You type. The editor holds {after['text']}, and dirty is true."
+    if action == "Compose":
+        return f"An input method composes in the editor, which holds {after['text']}. dirty is {after['dirty'].lower()}."
+    if action == "Unmark":
+        return f"unmark_text keeps the composed text. dirty is {after['dirty'].lower()}."
+    if action in ("SaveTimer", "LoseFocus", "Select", "IdleMove", "ShowTrash", "ShowNotes", "MoveToTrash", "Quit"):
+        why = {
+            "SaveTimer": "The save timer calls flush.",
+            "LoseFocus": "The window loses the focus, and on_activation calls flush.",
+            "Select": f"You pick {target(after)}, and select calls flush.",
+            "IdleMove": "The idle delay ends, and on_idle calls flush.",
+            "ShowTrash": "You go to the Trash, and show_trash calls flush.",
+            "ShowNotes": f"You go back to {target(after)}, and select calls flush.",
+            "MoveToTrash": "You move the note to the Trash, and move_to_trash calls flush.",
+            "Quit": "You quit, and may_leave calls flush.",
+        }[action]
+        return why + (" Nothing is dirty, so it returns true." if before["dirty"] == "FALSE" else "")
+    if action == "SaveRead":
+        return "Store::save reads the file. " + {
+            '"flushed"': "It already holds the text.",
+            '"save.rename"': "It may be replaced.",
+            '"create.pick"': "It changed elsewhere, so the text goes into a new note.",
+        }[after["pc"]]
+    if action == "SaveRename":
+        held = files(before["notes"])[ident(before["selection"])]
+        return f"Store::save renames its temporary file over {selection}, which held {held}. It returns Written."
+    if action == "RemoveRead":
+        return "Store::remove_unchanged reads the file. " + (
+            "It may be deleted." if after["pc"] == '"remove.unlink"' else "It is gone, or changed elsewhere and is kept.")
+    if action == "RemoveUnlink":
+        return f"Store::remove_unchanged deletes {place(before['selection'])}."
+    if action == "CreatePick":
+        return f"Store::create finds the name {after['picked']} free, and writes the temporary file."
+    if action == "CreateRename":
+        return f"Store::create renames its temporary file to {before['picked']}."
+    if action == "FlushFails":
+        return "A system call of the save fails. save_failed is true."
+    if action == "Flushed":
+        return f"flush has returned, and the handler goes on ({does(before)})."
+    if action == "Open":
+        return f"open reads {target(before)}. The editor now holds {after['text']}."
+    if action == "TrashPick":
+        return f"Store::trash finds the name {after['picked']} free in the trash."
+    if action == "TrashRename":
+        return f"Store::trash renames {place(before['selection'])} to .trash/{before['picked']}."
+    if action == "Restore":
+        return f"You restore the note. Store::restore finds the name {after['picked']} free."
+    if action == "RestoreRename":
+        return f"Store::restore renames {place(before['selection'])} to {before['picked']}."
+    if action == "Ask":
+        return f"You ask to delete {selection} forever. The editor shows {after['text']}."
+    if action == "Cancel":
+        return "You answer no."
+    if action == "Confirm":
+        return f"You answer yes. Store::purge deletes {place(before['selection'])}."
+    if action == "Sync":
+        return f"sync_with_disk looks at the folder. The editor now holds {after['text']}."
+    if action in ("TheyWrite", "TheyWriteInTrash"):
+        folder = "notes" if action == "TheyWrite" else "trash"
+        return "".join(f"Another program writes {text} to {'.trash/' if folder == 'trash' else ''}{n}." for n, text in changed(folder))
+    if action in ("TheyDelete", "TheyDeleteFromTrash"):
+        folder = "notes" if action == "TheyDelete" else "trash"
+        return "".join(f"Another program deletes {'.trash/' if folder == 'trash' else ''}{n}." for n, _ in changed(folder))
+    return action
+
+
+def tell(output):
+    steps = parse_trace(output)
+    for number, (action, values) in enumerate(steps):
+        before = steps[number - 1][1] if number else values
+        name = "Init" if action == "Initial" else action
+        print(f"  {number + 1:2}. [{name}] {told(name, before, values)}")
+
+
+# --- The code the model describes ------------------------------------------
+
+
+TABLE = HERE / "README.md"
+ROW = re.compile(r"^\| `(src/\S+?)` \| `(\w+)` \| (.*?) \| `(\w*)` \|$", re.M)
+
+
+def locked():
+    return re.findall(r"^\| `Cargo.lock` \| `([\w-]+) ([\d.]+)` \|", TABLE.read_text(), re.M)
+
+
+def fingerprint(code):
+    """Of the code alone: a comment can change without the model describing it any less."""
+    lines = [line.rstrip() for line in code.splitlines() if not line.lstrip().startswith("//")]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:12]
+
+
+def functions(source):
+    """The functions of a file rustfmt has formatted, by name, without its tests."""
+    source = re.split(r"\n#\[cfg\(test\)\]\n(?:pub(?:\(crate\))? )?mod tests \{", source)[0]
+    source = re.sub(r"\n#\[cfg\(test\)\]\nimpl .*?\n}\n", "\n", source, flags=re.S)
+    found = {}
+    for match in re.finditer(
+        r"^( *)(?:pub(?:\([a-z]+\))? )?(?:async )?fn (\w+)\b.*?^\1}$", source, re.M | re.S
+    ):
+        found.setdefault(match.group(2), match.group(0))
+    return found
+
+
+# A function that does one of these decides what becomes of a note's text, so it
+# belongs in README.md's table, covered or left out on purpose.
+TOUCHES = {
+    "src/app.rs": r"self\.store\.|self\.dirty\b|self\.loaded = |self\.selection = |self\.save_failed\b"
+                  r"|replace_editor\(|set_value\(|show_in_place\(|\.flush\(|remove_window\(|cx\.quit\(",
+    "src/store.rs": r"fs::(?:rename|remove_\w+|write)\(|File::create\(|write_if\(|write_atomically\(|free_name\(",
+}
+
+
+def drift():
+    """What changed in the covered code since it was confirmed, as messages."""
+    messages, known = [], {}
+    now = {path: functions((ROOT / path).read_text()) for path in TOUCHES}
+    for path, name, what, confirmed in ROW.findall(TABLE.read_text()):
+        known.setdefault(path, set()).add(name)
+        if name not in now[path]:
+            messages.append(f"{path}: {name} is gone")
+        elif fingerprint(now[path][name]) != confirmed and not what.startswith("Left out"):
+            messages.append(f"{path}: {name} changed")
+    for path, pattern in TOUCHES.items():
+        for name, body in now[path].items():
+            if name not in known.get(path, ()) and re.search(pattern, body):
+                messages.append(f"{path}: {name} isn't in README.md's table, and handles notes' text")
+    lock = (ROOT / "Cargo.lock").read_text()
+    for name, version in locked():
+        if f'name = "{name}"\nversion = "{version}"' not in lock:
+            messages.append(f"Cargo.lock: {name} is no longer {version}")
+    return messages
+
+
+def confirm():
+    now = {path: functions((ROOT / path).read_text()) for path in TOUCHES}
+    table = ROW.sub(lambda row: f"| `{row[1]}` | `{row[2]}` | {row[3]} | "
+                    f"`{fingerprint(now[row[1]].get(row[2], ''))}` |", TABLE.read_text())
+    TABLE.write_text(table)
+
+
+# --- The check -------------------------------------------------------------
+
+
+def run_case(jar, name, workers):
+    """The messages of what isn't as recorded, and a line that sums the case up."""
+    settings = CASES[name]
+    expected = settings["breaks"]
+    wrong = []
+    for rule in expected:
+        found, _ = tlc(jar, settings, [rule], workers)
+        if found != rule:
+            wrong.append(f"{name}: {rule} holds, and was recorded as broken")
+    if name.startswith("mistake-"):
+        past = f", as the code before {settings['past']} would be" if settings["past"] else ""
+        return wrong, f"caught by {expected[0]}{past}"
+    rest = [rule for rule in [*RULES, *ALSO] if rule not in expected]
+    found, output = tlc(jar, settings, rest, workers, coverage=name == "promise")
+    if found:
+        return [*wrong, f"{name}: {found} is broken. See check --trace {name} {found}"], ""
+    if name == "promise":
+        # A step the model never takes proves nothing about the code it stands for.
+        never = re.findall(r"<(\w+) line [^>]*>: 0:0", output)
+        idle = sorted(set(never) - {"Init"})
+        if idle:
+            wrong.append(f"promise: these steps are never taken: {', '.join(idle)}")
+        return wrong, f"{len(rest)} rules hold in {states(output)} states"
+    return wrong, f"still breaks {', '.join(expected)}; {len(rest)} other rules hold in {states(output)} states"
+
+
+def report(status, name, messages, line):
+    if not messages:
+        print(f"{status:6} {name}: {line}")
+    for message in messages:
+        print(f"WRONG  {message}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--drift", action="store_true")
+    parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--trace", nargs=2, metavar=("CASE", "RULE"))
+    parser.add_argument("--config", metavar="CASE")
+    options = parser.parse_args()
+
+    if options.config:
+        print(config_of(CASES[options.config], [*RULES], symmetry=False), end="")
+        return 0
+
+    if options.trace:
+        name, rule = options.trace
+        found, output = tlc(tlc_jar(), CASES[name], [rule], workers=1)
+        if not found:
+            print(f"{name}: {rule} holds in all {states(output)} states.")
+            return 0
+        print(f"{name} breaks {rule}. {RULES.get(rule, '')}")
+        tell(output)
+        return 1
+
+    if options.confirm:
+        confirm()
+        print("Recorded the covered code as it is now. Commit verify/README.md with it.")
+        return 0
+
+    changes = drift()
+    if changes:
+        print("DRIFT  The code has changed since the model was last confirmed to describe it. Compare each with")
+        print("       its action in verify/README.md, update the model, run verify/check, then --confirm:")
+        for message in changes:
+            print(f"         {message}")
+    else:
+        print("ok     The covered code is as it was when the model was last confirmed to describe it.")
+    if options.drift:
+        return 2 if changes else 0
+
+    started = time.monotonic()
+    jar = tlc_jar()
+    wrong = []
+    # The big runs one at a time on every core, the mistakes side by side.
+    big = [name for name in CASES if not name.startswith("mistake-")]
+    for name in big:
+        messages, line = run_case(jar, name, "auto")
+        wrong += messages
+        report("ok" if name == "promise" else "KNOWN", name, messages, line)
+    with concurrent.futures.ThreadPoolExecutor(max(1, (os.cpu_count() or 4) // 4)) as pool:
+        small = [name for name in CASES if name.startswith("mistake-")]
+        for name, (messages, line) in zip(small, pool.map(lambda n: run_case(jar, n, 2), small)):
+            wrong += messages
+            report("ok", name, messages, line)
+    print(f"       in {time.monotonic() - started:.0f} s")
+    if wrong:
+        return 1
+    return 2 if changes else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

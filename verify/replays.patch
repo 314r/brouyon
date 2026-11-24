@@ -1,0 +1,98 @@
+diff --git a/src/app.rs b/src/app.rs
+index a60b56b..e7d2165 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -4298,6 +4298,21 @@ pub(crate) mod tests {
+         until_listed(cx, "there");
+     }
+ 
++    #[gpui_kit::test]
++    fn replay_delete_forever_only_deletes_what_was_shown(cx: &mut TestAppContext) {
++        let (dir, view, cx, id) = with_one_trashed_note(cx);
++        fs::write(dir.path().join(".trash").join(&id), "rewritten elsewhere").unwrap();
++        notice_changes(&view, cx);
++        eprintln!("on screen after the change: {:?}", editor_text(&view, cx));
++        view.update_in(cx, |this, window, cx| {
++            this.ask(Confirm::DeleteForever(id), window, cx);
++        });
++        draw(cx);
++        cx.dispatch_action(actions::Confirm { secondary: false });
++        cx.run_until_parked();
++        assert_eq!(trashed_texts(dir.path()), ["rewritten elsewhere"]);
++    }
++
+     /// Renders every screen to PNGs for a person to review, with no window on the
+     /// desktop and the theme only changed inside this process:
+     /// `BROUYON_SCREENSHOTS=some/folder cargo test screenshots -- --ignored`
+diff --git a/src/store.rs b/src/store.rs
+index 7e815aa..ac25e95 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -752,4 +752,67 @@ mod tests {
+         assert_eq!(note.title, "Groceries");
+         assert_eq!(note.preview, "milk");
+     }
++
++    /// Run under the shim, which writes "theirs" over the target between the check
++    /// and the act, once, when a file called `.race` is beside it.
++    fn arm(dir: &Path) {
++        fs::write(dir.join(".race"), "").unwrap();
++    }
++
++    fn theirs_is_somewhere(dir: &Path) -> bool {
++        [dir.to_path_buf(), dir.join(".trash")].iter().any(|dir| {
++            fs::read_dir(dir).unwrap().any(|entry| {
++                fs::read_to_string(entry.unwrap().path()).is_ok_and(|text| text == "theirs")
++            })
++        })
++    }
++
++    #[test]
++    fn replay_gap_save() {
++        let (dir, store) = store();
++        let id = store.create("loaded").unwrap();
++        arm(dir.path());
++        eprintln!("{:?}", store.save(&id, "loaded", "mine"));
++        assert!(!dir.path().join(".race").exists(), "the shim never acted");
++        assert!(theirs_is_somewhere(dir.path()));
++    }
++
++    #[test]
++    fn replay_gap_remove() {
++        let (dir, store) = store();
++        let id = store.create("loaded").unwrap();
++        arm(dir.path());
++        eprintln!("{:?}", store.remove_unchanged(&id, "loaded"));
++        assert!(!dir.path().join(".race").exists(), "the shim never acted");
++        assert!(theirs_is_somewhere(dir.path()));
++    }
++
++    #[test]
++    fn replay_gap_create() {
++        let (dir, store) = store();
++        arm(dir.path());
++        eprintln!("{:?}", store.create("mine"));
++        assert!(!dir.path().join(".race").exists(), "the shim never acted");
++        assert!(theirs_is_somewhere(dir.path()));
++    }
++
++    #[test]
++    fn replay_gap_trash() {
++        let (dir, store) = store();
++        let id = store.create("mine").unwrap();
++        arm(&dir.path().join(".trash"));
++        eprintln!("{:?}", store.trash(&id));
++        assert!(!dir.path().join(".trash/.race").exists(), "the shim never acted");
++        assert!(theirs_is_somewhere(dir.path()));
++    }
++
++    #[test]
++    fn replay_gap_restore() {
++        let (dir, store) = store();
++        fs::write(dir.path().join(".trash/a.md"), "mine").unwrap();
++        arm(dir.path());
++        eprintln!("{:?}", store.restore("a.md"));
++        assert!(!dir.path().join(".race").exists(), "the shim never acted");
++        assert!(theirs_is_somewhere(dir.path()));
++    }
+ }

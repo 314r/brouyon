@@ -1,4 +1,5 @@
-# Runs everything bin/test does, and proves that each guard in guards/ still catches its mistake.
+# Runs everything bin/test does, proves that each guard in guards/ still catches its mistake,
+# and checks the model in verify/.
 name: Linux
 
 on:
@@ -40,3 +41,13 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: bin/test --locked
       - run: tools/prove-guards
+
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fetches the Java that verify/check pins.
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+      - run: verify/check
